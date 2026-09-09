@@ -174,7 +174,7 @@ fn detect_inbound_media_type(
 
     // Check tracker mappings
     let mut sorted_rules = qr.tracker_mappings.clone();
-    sorted_rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+    sorted_rules.sort_by_key(|a| std::cmp::Reverse(a.priority));
 
     for rule in &sorted_rules {
         let pat_clean = rule.pattern.trim_matches('*').to_lowercase();

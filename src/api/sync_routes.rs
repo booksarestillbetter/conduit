@@ -354,7 +354,7 @@ pub async fn classify_file(
 
         // 2a. Check structured tracker_mappings (sorted by priority descending)
         let mut sorted_rules = qr.tracker_mappings.clone();
-        sorted_rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        sorted_rules.sort_by_key(|a| std::cmp::Reverse(a.priority));
 
         'mapping_loop: for rule in &sorted_rules {
             for candidate in &tracker_candidates {

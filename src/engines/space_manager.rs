@@ -92,7 +92,7 @@ pub async fn run_space_manager_loop(
                             }
 
                             // Reclaim the most space first: sort largest-to-smallest before capping.
-                            candidates.sort_by(|a, b| b.2.cmp(&a.2));
+                            candidates.sort_by_key(|a| std::cmp::Reverse(a.2));
 
                             let max_purges = config.space_manager.max_purges_per_cycle;
                             candidates.truncate(max_purges);
