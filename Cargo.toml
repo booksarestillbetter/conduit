@@ -1,6 +1,6 @@
 [package]
 name = "conduit"
-version = "0.14.7"
+version = "0.15.0"
 edition = "2021"
 authors = ["Conduit Team"]
 description = "Conduit - Unified Media Fetching Commander, Media Replacer & Staging Sync Daemon"

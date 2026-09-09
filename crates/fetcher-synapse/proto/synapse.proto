@@ -1,4 +1,4 @@
-// Vendored from ../synapse/crates/synapse-rpc/proto/synapse.proto — synced with Synapse 2.0.
+// Vendored from ../synapse/crates/synapse-proto/proto/synapse.proto — synced with Synapse 2.0.
 // Synapse is a separate deployable service, so conduit vendors this rather than building against a sibling checkout —
 // keep it byte-for-byte in sync with synapse's copy by hand when that service's RPC surface changes;
 // a diverged copy here is a silent client/server schema mismatch, not a compile error.
@@ -25,6 +25,47 @@ service SynapseControl {
   rpc GetSessionStats(SessionStatsRequest) returns (SessionStatsUpdate);
   rpc GetSessionSettings(SessionSettingsRequest) returns (SessionSettingsResponse);
   rpc UpdateSessionSettings(UpdateSessionSettingsRequest) returns (UpdateSessionSettingsResponse);
+
+  // --- Capability Negotiation & Circuit Breaker Control ---
+  rpc GetCapabilities(Empty) returns (CapabilitiesResponse);
+  rpc ListCircuitBreakers(Empty) returns (CircuitBreakerListResponse);
+  rpc ForceCircuitBreakerAction(CircuitBreakerActionRequest) returns (CommandResponse);
+}
+
+message Empty {}
+
+message CapabilitiesResponse {
+  string version = 1;
+  repeated string features = 2; // e.g. "tracker_circuit_breaker_v1"
+}
+
+enum CircuitBreakerState {
+  CB_HEALTHY = 0;
+  CB_TRIPPED = 1;
+  CB_HALF_OPEN_CANARY = 2;
+  CB_RECOVERING = 3;
+}
+
+message CircuitBreakerStatus {
+  string host = 1;
+  CircuitBreakerState state = 2;
+  uint32 consecutive_successes = 3;
+  uint32 consecutive_failures = 4;
+  uint64 backoff_remaining_ms = 5; // 0 unless Tripped
+  optional float recovery_progress_pct = 6; // 0-100, only set while Recovering
+}
+
+message CircuitBreakerListResponse {
+  repeated CircuitBreakerStatus breakers = 1;
+}
+
+message CircuitBreakerActionRequest {
+  string host = 1;
+  enum Action {
+    TRIP = 0;
+    RESET = 1;
+  }
+  Action action = 2;
 }
 
 enum TorrentState {
@@ -131,6 +172,8 @@ message TrackerStatus {
   int64 next_announce_in = 5;
   optional string failure_reason = 6;
   bool is_circuit_broken = 7;
+  optional CircuitBreakerState cb_state = 8;
+  optional float recovery_progress_pct = 9;
 }
 
 message FileProgress {

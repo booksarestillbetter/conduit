@@ -20,7 +20,7 @@ import {
   Cog,
 } from 'lucide-react';
 import { SystemHealthOverview, EngineStatus } from '../types';
-import { batchReplaceTrackers } from '../services/api';
+import { batchReplaceTrackers, forceTripCircuitBreaker, forceResetCircuitBreaker } from '../services/api';
 
 interface HealthPanelProps {
   health: SystemHealthOverview | null;
@@ -53,6 +53,31 @@ export const HealthPanel: React.FC<HealthPanelProps> = ({
   const [replaceNewUrl, setReplaceNewUrl] = useState('');
   const [replaceTargetNode, setReplaceTargetNode] = useState('all');
   const [replacing, setReplacing] = useState(false);
+  const [breakerActionHost, setBreakerActionHost] = useState<string | null>(null);
+
+  const handleForceTrip = async (host: string) => {
+    if (!window.confirm(`Force-trip the circuit breaker for '${host}'? This pauses its active torrents immediately.`)) return;
+    setBreakerActionHost(host);
+    try {
+      await forceTripCircuitBreaker(host);
+    } catch {
+      // Errors surface via the next health poll reflecting no change; nothing more to do here.
+    } finally {
+      setBreakerActionHost(null);
+    }
+  };
+
+  const handleForceReset = async (host: string) => {
+    if (!window.confirm(`Force-reset the circuit breaker for '${host}'? This resumes any torrents it paused.`)) return;
+    setBreakerActionHost(host);
+    try {
+      await forceResetCircuitBreaker(host);
+    } catch {
+      // Errors surface via the next health poll reflecting no change; nothing more to do here.
+    } finally {
+      setBreakerActionHost(null);
+    }
+  };
 
   if (!health) {
     return (
@@ -280,10 +305,20 @@ export const HealthPanel: React.FC<HealthPanelProps> = ({
                     <div className="space-y-0.5">
                       <div className="flex items-center space-x-2">
                         <span className="font-bold text-sm text-slate-100 font-mono">{tr.host}</span>
+                        <span
+                          className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider border ${
+                            tr.breaker_mode === 'passive'
+                              ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                              : 'bg-slate-700/40 text-slate-400 border-slate-600/40'
+                          }`}
+                          title={tr.breaker_mode === 'passive' ? "This node's own daemon manages its breaker natively" : 'Conduit manages this breaker externally'}
+                        >
+                          {tr.breaker_mode === 'passive' ? 'Native' : 'Conduit'}
+                        </span>
                         {isBroken && (
                           <span className="inline-flex items-center space-x-1 rounded-md bg-purple-500/20 px-2 py-0.5 text-[10px] font-bold text-purple-300 border border-purple-500/30">
                             <Zap className="h-3 w-3" />
-                            <span>CIRCUIT BROKEN</span>
+                            <span>{tr.cb_state === 'recovering' ? 'RECOVERING' : 'CIRCUIT BROKEN'}</span>
                           </span>
                         )}
                       </div>
@@ -390,6 +425,24 @@ export const HealthPanel: React.FC<HealthPanelProps> = ({
                     </div>
                   )}
 
+                  {/* Recovery Ramp-Up Progress */}
+                  {tr.cb_state === 'recovering' && tr.recovery_progress_pct != null && (
+                    <div className="space-y-1 bg-slate-900/60 p-2.5 rounded-lg border border-sky-500/20">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-sky-300 font-medium">
+                          Ramping traffic back up{tr.consecutive_successes != null ? ` • ${tr.consecutive_successes} consecutive successes` : ''}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-mono">{tr.recovery_progress_pct.toFixed(0)}%</span>
+                      </div>
+                      <div className="w-full h-2 bg-slate-800/90 rounded-full overflow-hidden">
+                        <div
+                          style={{ width: `${Math.min(100, Math.max(0, tr.recovery_progress_pct))}%` }}
+                          className="h-full bg-sky-400 transition-all"
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   {/* Current Tracker Announce Response */}
                   <div className="rounded-lg bg-slate-900/70 border border-slate-800 p-2.5 text-xs font-mono space-y-1">
                     <div className="text-[10px] uppercase font-sans tracking-wider text-slate-500 font-semibold">
@@ -412,8 +465,27 @@ export const HealthPanel: React.FC<HealthPanelProps> = ({
                   </div>
 
                   {/* Quick Action Footer */}
-                  {onFilterTracker && (
-                    <div className="flex items-center justify-end pt-1">
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center space-x-3">
+                      {isBroken ? (
+                        <button
+                          onClick={() => handleForceReset(tr.host)}
+                          disabled={breakerActionHost === tr.host}
+                          className="text-[11px] text-emerald-400 hover:text-emerald-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1 font-medium"
+                        >
+                          <span>Force Reset</span>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleForceTrip(tr.host)}
+                          disabled={breakerActionHost === tr.host}
+                          className="text-[11px] text-rose-400 hover:text-rose-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1 font-medium"
+                        >
+                          <span>Force Trip</span>
+                        </button>
+                      )}
+                    </div>
+                    {onFilterTracker && (
                       <button
                         onClick={() => onFilterTracker(tr.host)}
                         className="text-[11px] text-slate-400 hover:text-slate-200 flex items-center space-x-1 font-medium"
@@ -421,8 +493,8 @@ export const HealthPanel: React.FC<HealthPanelProps> = ({
                         <span>View {tr.total_torrents} Swarms</span>
                         <ArrowRight className="h-3 w-3" />
                       </button>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               );
             })}

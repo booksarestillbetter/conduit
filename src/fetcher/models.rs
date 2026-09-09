@@ -146,6 +146,19 @@ pub struct ActiveCircuitBreaker {
     pub paused_torrents: Vec<String>,
     pub failing_error: String,
     pub tripped_at: i64,
+    /// `"tripped"`, `"half_open_canary"`, or `"recovering"` — absent/default (empty string)
+    /// is treated as `"tripped"` for records written before this field existed.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub recovery_started_at: Option<i64>,
+    #[serde(default)]
+    pub consecutive_successes: u32,
+    /// Current re-trip cooldown, doubling on relapse (capped at
+    /// `TrackerCircuitBreakerConfig::max_tripped_secs`). `0` means "use
+    /// `initial_backoff_secs`" (records written before this field existed).
+    #[serde(default)]
+    pub backoff_secs: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -178,6 +191,23 @@ pub struct TrackerHealthStatus {
     pub last_announce_succeeded: bool,
     pub affected_nodes: Vec<String>,
     pub is_circuit_broken: bool,
+    /// `"active"` (Conduit is managing this tracker's breaker itself) or `"passive"`
+    /// (a node's own native breaker is authoritative and Conduit is just mirroring its
+    /// status). Defaults to `"active"` for backward compatibility with older responses.
+    #[serde(default = "default_breaker_mode")]
+    pub breaker_mode: String,
+    /// `"tripped"`, `"half_open_canary"`, or `"recovering"` — mirrors `ActiveCircuitBreaker`
+    /// in active mode, or the owning node's native breaker state in passive mode.
+    #[serde(default)]
+    pub cb_state: Option<String>,
+    #[serde(default)]
+    pub recovery_progress_pct: Option<f32>,
+    #[serde(default)]
+    pub consecutive_successes: Option<u32>,
+}
+
+fn default_breaker_mode() -> String {
+    "active".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

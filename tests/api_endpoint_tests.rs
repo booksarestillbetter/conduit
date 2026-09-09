@@ -145,6 +145,7 @@ async fn setup_test_context() -> TestContext {
             paused_torrents: vec!["test_node:42".to_string()],
             tripped_at: Utc::now().timestamp(),
             failing_error: "Tracker HTTP response 530 (Unknown Error)".to_string(),
+            ..Default::default()
         },
     );
 
@@ -522,6 +523,10 @@ async fn test_circuit_breaker_persistence_and_restore_across_restart() {
         paused_torrents: vec!["node1:101".to_string(), "node1:102".to_string(), "node1:103".to_string()],
         failing_error: "Tracker HTTP response 530 (Unknown Error)".to_string(),
         tripped_at: Utc::now().timestamp(),
+        state: "recovering".to_string(),
+        recovery_started_at: Some(Utc::now().timestamp()),
+        consecutive_successes: 3,
+        backoff_secs: 60,
     };
 
     // 1. Save circuit breaker to database
@@ -533,6 +538,10 @@ async fn test_circuit_breaker_persistence_and_restore_across_restart() {
     assert_eq!(breakers[0].tracker_host, "landof.tv:80");
     assert_eq!(breakers[0].canary_compound_id, "node1:100");
     assert_eq!(breakers[0].paused_torrents.len(), 3);
+    assert_eq!(breakers[0].state, "recovering");
+    assert_eq!(breakers[0].consecutive_successes, 3);
+    assert_eq!(breakers[0].backoff_secs, 60);
+    assert!(breakers[0].recovery_started_at.is_some());
 
     // 3. Simulate daemon restart with fresh FetcherPool
     let fresh_pool = Arc::new(FetcherPool::new());

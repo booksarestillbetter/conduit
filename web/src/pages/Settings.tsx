@@ -66,7 +66,21 @@ import {
   sendPlexWebhookTest,
   sendOmbiWebhookTest,
 } from '../services/api';
-import { AppConfig, ApiTokenRecord, ArrNodeConfig, ZoneConfig, ClassifyFileResponse, TransmissionNodeConfig, RemoteSyncFolderMapping, PlexScrobbleRecord, OmbiRequestRecord, APP_VERSION, NotificationChannel, NotificationTarget, NOTIFICATION_CATEGORIES } from '../types';
+import { AppConfig, ApiTokenRecord, ArrNodeConfig, ZoneConfig, ClassifyFileResponse, TransmissionNodeConfig, RemoteSyncFolderMapping, PlexScrobbleRecord, OmbiRequestRecord, APP_VERSION, NotificationChannel, NotificationTarget, NOTIFICATION_CATEGORIES, TrackerCircuitBreakerConfig } from '../types';
+
+const DEFAULT_TRACKER_CB_CONFIG: TrackerCircuitBreakerConfig = {
+  enabled: true,
+  canary_probe_enabled: true,
+  auto_resume_on_recovery: true,
+  failure_ratio_threshold: 0.5,
+  min_failures: 3,
+  error_patterns: ['530', '502', '503', '504', '403', '429', 'The tracker is down', 'tracker is down', 'Connection refused', 'Could not connect', 'Timed out', 'Host not found', 'unreachable'],
+  check_interval_secs: 20,
+  max_tripped_secs: 21600,
+  initial_backoff_secs: 30,
+  recovery_ramp_secs: 30,
+  recovery_success_threshold: 5,
+};
 
 export const Settings: React.FC = () => {
   const [tab, setTab] = useState<'nodes' | 'arr' | 'zones' | 'sync' | 'plex_trakt' | 'notify' | 'rules' | 'system' | 'tokens' | 'backup'>('nodes');
@@ -941,16 +955,7 @@ export const Settings: React.FC = () => {
                   type="checkbox"
                   checked={config.tracker_circuit_breaker?.enabled ?? true}
                   onChange={(e) => {
-                    const currentCb = config.tracker_circuit_breaker ?? {
-                      enabled: true,
-                      canary_probe_enabled: true,
-                      auto_resume_on_recovery: true,
-                      failure_ratio_threshold: 0.5,
-                      min_failures: 3,
-                      error_patterns: ['530', '502', '503', '504', '403', '429', 'The tracker is down', 'tracker is down', 'Connection refused', 'Could not connect', 'Timed out', 'Host not found', 'unreachable'],
-                      check_interval_secs: 20,
-                      max_tripped_secs: 21600,
-                    };
+                    const currentCb = config.tracker_circuit_breaker ?? DEFAULT_TRACKER_CB_CONFIG;
                     setConfig({
                       ...config,
                       tracker_circuit_breaker: { ...currentCb, enabled: e.target.checked },
@@ -977,16 +982,7 @@ export const Settings: React.FC = () => {
                         step="5"
                         value={Math.round((config.tracker_circuit_breaker?.failure_ratio_threshold ?? 0.50) * 100)}
                         onChange={(e) => {
-                          const currentCb = config.tracker_circuit_breaker ?? {
-                            enabled: true,
-                            canary_probe_enabled: true,
-                            auto_resume_on_recovery: true,
-                            failure_ratio_threshold: 0.5,
-                            min_failures: 3,
-                            error_patterns: ['530', '502', '503', '504', '403', '429', 'The tracker is down', 'tracker is down', 'Connection refused', 'Could not connect', 'Timed out', 'Host not found', 'unreachable'],
-                            check_interval_secs: 20,
-                            max_tripped_secs: 21600,
-                          };
+                          const currentCb = config.tracker_circuit_breaker ?? DEFAULT_TRACKER_CB_CONFIG;
                           setConfig({
                             ...config,
                             tracker_circuit_breaker: { ...currentCb, failure_ratio_threshold: Number(e.target.value) / 100 },
@@ -1013,16 +1009,7 @@ export const Settings: React.FC = () => {
                       max="100"
                       value={config.tracker_circuit_breaker?.min_failures ?? 3}
                       onChange={(e) => {
-                        const currentCb = config.tracker_circuit_breaker ?? {
-                          enabled: true,
-                          canary_probe_enabled: true,
-                          auto_resume_on_recovery: true,
-                          failure_ratio_threshold: 0.5,
-                          min_failures: 3,
-                          error_patterns: ['530', '502', '503', '504', '403', '429', 'The tracker is down', 'tracker is down', 'Connection refused', 'Could not connect', 'Timed out', 'Host not found', 'unreachable'],
-                          check_interval_secs: 20,
-                          max_tripped_secs: 21600,
-                        };
+                        const currentCb = config.tracker_circuit_breaker ?? DEFAULT_TRACKER_CB_CONFIG;
                         setConfig({
                           ...config,
                           tracker_circuit_breaker: { ...currentCb, min_failures: Math.max(1, Number(e.target.value)) },
@@ -1047,16 +1034,7 @@ export const Settings: React.FC = () => {
                       max="48"
                       value={Math.round((config.tracker_circuit_breaker?.max_tripped_secs ?? 21600) / 3600)}
                       onChange={(e) => {
-                        const currentCb = config.tracker_circuit_breaker ?? {
-                          enabled: true,
-                          canary_probe_enabled: true,
-                          auto_resume_on_recovery: true,
-                          failure_ratio_threshold: 0.5,
-                          min_failures: 3,
-                          error_patterns: ['530', '502', '503', '504', '403', '429', 'The tracker is down', 'tracker is down', 'Connection refused', 'Could not connect', 'Timed out', 'Host not found', 'unreachable'],
-                          check_interval_secs: 20,
-                          max_tripped_secs: 21600,
-                        };
+                        const currentCb = config.tracker_circuit_breaker ?? DEFAULT_TRACKER_CB_CONFIG;
                         setConfig({
                           ...config,
                           tracker_circuit_breaker: { ...currentCb, max_tripped_secs: Math.max(1, Number(e.target.value)) * 3600 },
@@ -1075,16 +1053,7 @@ export const Settings: React.FC = () => {
                         type="checkbox"
                         checked={config.tracker_circuit_breaker?.auto_resume_on_recovery ?? true}
                         onChange={(e) => {
-                          const currentCb = config.tracker_circuit_breaker ?? {
-                            enabled: true,
-                            canary_probe_enabled: true,
-                            auto_resume_on_recovery: true,
-                            failure_ratio_threshold: 0.5,
-                            min_failures: 3,
-                            error_patterns: ['530', '502', '503', '504', '403', '429', 'The tracker is down', 'tracker is down', 'Connection refused', 'Could not connect', 'Timed out', 'Host not found', 'unreachable'],
-                            check_interval_secs: 20,
-                            max_tripped_secs: 21600,
-                          };
+                          const currentCb = config.tracker_circuit_breaker ?? DEFAULT_TRACKER_CB_CONFIG;
                           setConfig({
                             ...config,
                             tracker_circuit_breaker: { ...currentCb, auto_resume_on_recovery: e.target.checked },
@@ -1094,6 +1063,77 @@ export const Settings: React.FC = () => {
                       />
                       <span>Auto-resume all on recovery</span>
                     </label>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4 pt-1">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                      Initial Backoff (Seconds)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="3600"
+                      value={config.tracker_circuit_breaker?.initial_backoff_secs ?? DEFAULT_TRACKER_CB_CONFIG.initial_backoff_secs}
+                      onChange={(e) => {
+                        const currentCb = config.tracker_circuit_breaker ?? DEFAULT_TRACKER_CB_CONFIG;
+                        setConfig({
+                          ...config,
+                          tracker_circuit_breaker: { ...currentCb, initial_backoff_secs: Math.max(1, Number(e.target.value)) },
+                        });
+                      }}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-800 py-2 px-3 text-sm text-slate-200 focus:border-amber-500 focus:outline-none font-mono"
+                    />
+                    <span className="text-[11px] text-slate-500 mt-1 block">
+                      Cooldown before checking recovery, doubling on relapse (default: 30s).
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                      Recovery Ramp Window (Seconds)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="3600"
+                      value={config.tracker_circuit_breaker?.recovery_ramp_secs ?? DEFAULT_TRACKER_CB_CONFIG.recovery_ramp_secs}
+                      onChange={(e) => {
+                        const currentCb = config.tracker_circuit_breaker ?? DEFAULT_TRACKER_CB_CONFIG;
+                        setConfig({
+                          ...config,
+                          tracker_circuit_breaker: { ...currentCb, recovery_ramp_secs: Math.max(1, Number(e.target.value)) },
+                        });
+                      }}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-800 py-2 px-3 text-sm text-slate-200 focus:border-amber-500 focus:outline-none font-mono"
+                    />
+                    <span className="text-[11px] text-slate-500 mt-1 block">
+                      How long to stagger resuming paused torrents after a successful canary check (default: 30s).
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                      Recovery Success Threshold
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="50"
+                      value={config.tracker_circuit_breaker?.recovery_success_threshold ?? DEFAULT_TRACKER_CB_CONFIG.recovery_success_threshold}
+                      onChange={(e) => {
+                        const currentCb = config.tracker_circuit_breaker ?? DEFAULT_TRACKER_CB_CONFIG;
+                        setConfig({
+                          ...config,
+                          tracker_circuit_breaker: { ...currentCb, recovery_success_threshold: Math.max(1, Number(e.target.value)) },
+                        });
+                      }}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-800 py-2 px-3 text-sm text-slate-200 focus:border-amber-500 focus:outline-none font-mono"
+                    />
+                    <span className="text-[11px] text-slate-500 mt-1 block">
+                      Consecutive successful canary checks required before declaring healthy (default: 5).
+                    </span>
                   </div>
                 </div>
               </div>

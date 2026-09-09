@@ -1,7 +1,8 @@
 // src/api/metrics_routes.rs
-use crate::auth::AppState;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use crate::auth::{AppState, RequireAuth};
+use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
+use serde_json::json;
 use sysinfo::System;
 use utoipa::ToSchema;
 
@@ -170,6 +171,138 @@ pub async fn get_system_stats() -> Result<Json<HostSystemStats>, StatusCode> {
 pub async fn get_system_health(State(state): State<AppState>) -> Result<Json<crate::fetcher::SystemHealthOverview>, StatusCode> {
     let overview = state.fetcher_pool.get_system_health();
     Ok(Json(overview))
+}
+
+/// The node(s) whose native breaker is authoritative for this tracker host, or `None` if
+/// no node touching it is in passive mode (i.e. Conduit's own active breaker owns it) —
+/// mirrors the "all nodes touching this host are passive" rule the health engine and
+/// dashboard use, so an override always lands wherever the displayed status says it will.
+fn passive_owner_nodes(pool: &crate::fetcher::FetcherPool, host: &str) -> Option<Vec<String>> {
+    let torrents = pool.get_torrents(None, None, None);
+    let mut nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut touched = false;
+    for t in &torrents {
+        if t.tracker_stats.iter().any(|ts| ts.host == host) {
+            touched = true;
+            if !pool.is_passive_mode(&t.node) {
+                return None;
+            }
+            nodes.insert(t.node.clone());
+        }
+    }
+    if touched && !nodes.is_empty() {
+        Some(nodes.into_iter().collect())
+    } else {
+        None
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/system/circuit-breakers/{host}/trip",
+    tag = "Metrics",
+    summary = "Force-trip a tracker's circuit breaker",
+    description = "Forces the given tracker host's circuit breaker into a tripped state. Routed to the owning node's native breaker in passive mode (see /api/system/health's breaker_mode field), or applied directly to Conduit's own external breaker in active mode.",
+    params(
+        ("host" = String, Path, description = "Tracker hostname")
+    ),
+    responses(
+        (status = 200, description = "Circuit breaker force-tripped"),
+        (status = 401, description = "Unauthorized")
+    )
+)]
+pub async fn force_trip_circuit_breaker(
+    _auth: RequireAuth,
+    State(state): State<AppState>,
+    Path(host): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(owning_nodes) = passive_owner_nodes(&state.fetcher_pool, &host) {
+        for node in &owning_nodes {
+            if let Some(client) = state.fetcher_pool.get_client(node) {
+                let _ = client.force_trip_circuit_breaker(&host).await;
+            }
+        }
+        return Ok(Json(json!({
+            "message": format!("Circuit breaker for '{}' force-tripped via {}", host, owning_nodes.join(", "))
+        })));
+    }
+
+    // Active mode: pause every torrent currently announcing to this tracker and record a
+    // synthetic breaker. No real canary is designated (this is a manual override, not a
+    // failure-detected trip), so it holds for one backoff window and then auto-clears on
+    // the next tick since there's nothing left to actively re-check.
+    let torrents = state.fetcher_pool.get_torrents(None, None, None);
+    let mut paused = Vec::new();
+    for t in &torrents {
+        if t.tracker_stats.iter().any(|ts| ts.host == host) && t.raw_status != 0 {
+            if let Some(client) = state.fetcher_pool.get_client(&t.node) {
+                if client.stop_torrents(&[t.id]).await.is_ok() {
+                    paused.push(format!("{}:{}", t.node, t.id));
+                }
+            }
+        }
+    }
+    let breaker = crate::fetcher::ActiveCircuitBreaker {
+        tracker_host: host.clone(),
+        canary_compound_id: String::new(),
+        canary_name: String::new(),
+        paused_torrents: paused,
+        failing_error: "Manually force-tripped".to_string(),
+        tripped_at: chrono::Utc::now().timestamp(),
+        state: "tripped".to_string(),
+        recovery_started_at: None,
+        consecutive_successes: 0,
+        backoff_secs: 0,
+    };
+    let _ = state.db.save_circuit_breaker(&breaker);
+    state.fetcher_pool.set_active_breaker(host.clone(), breaker);
+    Ok(Json(json!({"message": format!("Circuit breaker for '{}' force-tripped", host)})))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/system/circuit-breakers/{host}/reset",
+    tag = "Metrics",
+    summary = "Force-reset a tracker's circuit breaker",
+    description = "Clears the given tracker host's circuit breaker state entirely and resumes any torrents it had paused. Routed to the owning node's native breaker in passive mode, or applied directly to Conduit's own external breaker in active mode.",
+    params(
+        ("host" = String, Path, description = "Tracker hostname")
+    ),
+    responses(
+        (status = 200, description = "Circuit breaker force-reset"),
+        (status = 401, description = "Unauthorized")
+    )
+)]
+pub async fn force_reset_circuit_breaker(
+    _auth: RequireAuth,
+    State(state): State<AppState>,
+    Path(host): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(owning_nodes) = passive_owner_nodes(&state.fetcher_pool, &host) {
+        for node in &owning_nodes {
+            if let Some(client) = state.fetcher_pool.get_client(node) {
+                let _ = client.force_reset_circuit_breaker(&host).await;
+            }
+        }
+        return Ok(Json(json!({
+            "message": format!("Circuit breaker for '{}' force-reset via {}", host, owning_nodes.join(", "))
+        })));
+    }
+
+    if let Some(breaker) = state.fetcher_pool.get_active_breakers().get(&host).cloned() {
+        for cid in &breaker.paused_torrents {
+            if let Some((node, id_str)) = cid.split_once(':') {
+                if let Ok(id) = id_str.parse::<i64>() {
+                    if let Some(client) = state.fetcher_pool.get_client(node) {
+                        let _ = client.start_torrents(&[id], false).await;
+                    }
+                }
+            }
+        }
+    }
+    let _ = state.db.remove_circuit_breaker(&host);
+    state.fetcher_pool.remove_active_breaker(&host);
+    Ok(Json(json!({"message": format!("Circuit breaker for '{}' force-reset", host)})))
 }
 
 #[utoipa::path(

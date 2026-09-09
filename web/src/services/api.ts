@@ -738,6 +738,24 @@ export async function fetchEngineHealth(): Promise<import('../types').EngineStat
   return res.json();
 }
 
+export async function forceTripCircuitBreaker(host: string): Promise<{ message: string }> {
+  const res = await apiFetch(`${API_BASE}/api/system/circuit-breakers/${encodeURIComponent(host)}/trip`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to force-trip circuit breaker');
+  return res.json();
+}
+
+export async function forceResetCircuitBreaker(host: string): Promise<{ message: string }> {
+  const res = await apiFetch(`${API_BASE}/api/system/circuit-breakers/${encodeURIComponent(host)}/reset`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to force-reset circuit breaker');
+  return res.json();
+}
+
 export async function fetchPlexScrobbles(params?: {
   limit?: number;
   offset?: number;

@@ -2,6 +2,29 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use crate::config::RetrieverClientType;
 
+/// Feature capabilities detected on a fetcher node's daemon at runtime, distinct from the
+/// static `client_type` config choice — a node configured as `Synapse` still reports
+/// `native_tracker_circuit_breaker: false` if it's running an older build that predates the
+/// feature. Deliberately not persisted anywhere; re-detected on every poll cycle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct NodeCapabilities {
+    pub native_tracker_circuit_breaker: bool,
+}
+
+/// A single tracker host's live circuit breaker status, as reported by a node's own
+/// native breaker (only meaningful for nodes where `NodeCapabilities::
+/// native_tracker_circuit_breaker` is true — see `TorrentClientTrait::list_circuit_breakers`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct NativeCircuitBreakerStatus {
+    pub host: String,
+    /// `"healthy"`, `"tripped"`, `"half_open_canary"`, or `"recovering"`.
+    pub state: String,
+    pub consecutive_successes: u32,
+    pub consecutive_failures: u32,
+    pub backoff_remaining_ms: u64,
+    pub recovery_progress_pct: Option<f32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TorrentStatus {

@@ -1027,10 +1027,26 @@ pub struct TrackerCircuitBreakerConfig {
     /// the canary torrent loses its tracker-stats entry (list edited, stale stat dropped).
     #[serde(default = "default_cb_max_tripped_secs")]
     pub max_tripped_secs: i64,
+    /// Initial cooldown after tripping before the canary's recovery announce is even
+    /// checked, doubling on relapse (capped at `max_tripped_secs`) — mirrors Synapse's
+    /// tracker breaker backoff.
+    #[serde(default = "default_cb_initial_backoff_secs")]
+    pub initial_backoff_secs: i64,
+    /// How long, after a successful canary recovery, to stay in the `Recovering` ramp
+    /// phase (staggering resumption of paused torrents) before fully clearing the breaker.
+    #[serde(default = "default_cb_recovery_ramp_secs")]
+    pub recovery_ramp_secs: u64,
+    /// Consecutive successful canary checks required during the ramp window before full
+    /// graduation to healthy (in addition to the ramp window itself elapsing).
+    #[serde(default = "default_cb_recovery_success_threshold")]
+    pub recovery_success_threshold: u32,
 }
 
 fn default_cb_check_interval() -> u64 { 20 }
 fn default_cb_max_tripped_secs() -> i64 { 6 * 3600 }
+fn default_cb_initial_backoff_secs() -> i64 { 30 }
+fn default_cb_recovery_ramp_secs() -> u64 { 30 }
+fn default_cb_recovery_success_threshold() -> u32 { 5 }
 fn default_cb_failure_ratio_threshold() -> f64 { 0.50 }
 fn default_cb_min_failures() -> usize { 3 }
 fn default_cb_error_patterns() -> Vec<String> {
@@ -1063,6 +1079,9 @@ impl Default for TrackerCircuitBreakerConfig {
             error_patterns: default_cb_error_patterns(),
             check_interval_secs: default_cb_check_interval(),
             max_tripped_secs: default_cb_max_tripped_secs(),
+            initial_backoff_secs: default_cb_initial_backoff_secs(),
+            recovery_ramp_secs: default_cb_recovery_ramp_secs(),
+            recovery_success_threshold: default_cb_recovery_success_threshold(),
         }
     }
 }

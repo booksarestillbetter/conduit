@@ -1,12 +1,36 @@
 use async_trait::async_trait;
 use crate::config::{FetcherNodeConfig, RetrieverClientType};
-use crate::models::Torrent;
+use crate::models::{NativeCircuitBreakerStatus, NodeCapabilities, Torrent};
 
 #[async_trait]
 pub trait TorrentClientTrait: Send + Sync {
     fn node_name(&self) -> &str;
     fn config(&self) -> &FetcherNodeConfig;
     fn client_type(&self) -> RetrieverClientType;
+
+    /// Detects optional native features this specific daemon instance supports (e.g. a
+    /// built-in tracker circuit breaker). Default: none — only backends that can actually
+    /// support a given feature need to override this.
+    async fn get_capabilities(&self) -> anyhow::Result<NodeCapabilities> {
+        Ok(NodeCapabilities::default())
+    }
+
+    /// Lists this node's own native tracker circuit breaker status, for backends where
+    /// `get_capabilities().native_tracker_circuit_breaker` is true. Default: empty — only
+    /// meaningful once a backend actually has a native breaker to report.
+    async fn list_circuit_breakers(&self) -> anyhow::Result<Vec<NativeCircuitBreakerStatus>> {
+        Ok(Vec::new())
+    }
+
+    /// Forces a tracker host's native breaker into a tripped state. No-op default.
+    async fn force_trip_circuit_breaker(&self, _host: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Clears a tracker host's native breaker state entirely. No-op default.
+    async fn force_reset_circuit_breaker(&self, _host: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 
     async fn get_torrents(&self, ids: Option<Vec<i64>>) -> anyhow::Result<Vec<Torrent>>;
     async fn get_torrent_details(&self, id: i64) -> anyhow::Result<Torrent>;

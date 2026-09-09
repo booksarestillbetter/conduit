@@ -468,7 +468,7 @@ checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "conduit"
-version = "0.14.7"
+version = "0.15.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

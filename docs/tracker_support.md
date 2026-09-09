@@ -99,12 +99,39 @@ Deluge utilizes a client-daemon architecture (`deluged` on port `58846` and `del
 
 ---
 
+## 3.5. Circuit Breaker: Passive vs. Active Mode
+
+Conduit's tracker circuit breaker (failure detection, canary probing, and progressive
+recovery ramp-up) runs in one of two modes, chosen automatically per node — no
+configuration needed:
+
+- **Passive mode** (Synapse ≥ the version that added `tracker_circuit_breaker_v1`):
+  Conduit detects the capability via `GetCapabilities` (gRPC) or the `features` field on
+  `GET /api/v1/health` (REST), then reads Synapse's own breaker state instead of managing
+  it externally — Synapse decides when to trip, ramp up, and fully recover. Conduit just
+  mirrors that status into the same dashboard/API surface (`breaker_mode: "passive"` on
+  `TrackerHealthStatus`) and offers force-trip/force-reset overrides that proxy through to
+  Synapse's own `ForceCircuitBreakerAction` RPC. An older Synapse build that predates this
+  capability is treated exactly like any other backend (falls back to active mode).
+- **Active mode** (Transmission, qBittorrent, Deluge, or an older Synapse): Conduit
+  manages the breaker itself exactly as before — polling tracker announce results,
+  pausing/resuming torrents externally — now with the same progressive ramp-up and
+  backoff-doubling-on-relapse behavior Synapse's native breaker has, configurable via
+  `tracker_circuit_breaker.recovery_ramp_secs` / `recovery_success_threshold` /
+  `initial_backoff_secs` in Conduit's own settings.
+
+A tracker host shared across both a passive-capable node and an active-only node stays in
+active mode for that host (so the active-only node's torrents don't go unmanaged) — see
+`is_host_all_passive` in `src/engines/circuit_breaker.rs`.
+
+---
+
 ## 4. Feature Parity Matrix
 
 | Feature in Conduit | Synapse (gRPC) | Transmission | qBittorrent | Deluge (Web RPC) |
 |---|:---:|:---:|:---:|:---:|
 | **Unified Swarm Telemetry & Speed Rates** | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
-| **Circuit Breaker & Canary Probing** | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
+| **Circuit Breaker & Canary Probing** | ✅ Passive (native, ramp-up) | ✅ Active (Conduit-managed, ramp-up) | ✅ Active (Conduit-managed, ramp-up) | ✅ Active (Conduit-managed, ramp-up) |
 | **Multi-Tier Swarm Health Ratio** | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
 | **Space Manager Auto-Purge & Disk Checks** | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
 | **Multi-Tier File Sync & Intake Staging** | ✅ Full | ✅ Full | ✅ Full | ✅ Full |

@@ -10,8 +10,8 @@ pub use live_cache::SynapseLiveCache;
 use async_trait::async_trait;
 use base64::Engine;
 use fetcher_core::{
-    FetcherDriverFactory, FetcherNodeConfig, RetrieverClientType, Torrent, TorrentClientTrait,
-    TorrentFile, TorrentPeer, TrackerStat,
+    FetcherDriverFactory, FetcherNodeConfig, NativeCircuitBreakerStatus, NodeCapabilities,
+    RetrieverClientType, Torrent, TorrentClientTrait, TorrentFile, TorrentPeer, TrackerStat,
 };
 use proto::v2::{
     TorrentDetailEvent, TorrentState, TorrentSummary, UpdateSessionSettingsRequest,
@@ -171,6 +171,48 @@ impl TorrentClientTrait for SynapseClient {
 
     fn client_type(&self) -> RetrieverClientType {
         RetrieverClientType::Synapse
+    }
+
+    async fn get_capabilities(&self) -> anyhow::Result<NodeCapabilities> {
+        match self.client.get_capabilities().await {
+            Ok(resp) => Ok(NodeCapabilities {
+                native_tracker_circuit_breaker: resp
+                    .features
+                    .iter()
+                    .any(|f| f == "tracker_circuit_breaker_v1"),
+            }),
+            // An older Synapse build that predates this RPC entirely — that's not a
+            // connection failure, it just has no optional features.
+            Err(SynapseClientError::Rpc { code: tonic::Code::Unimplemented, .. }) => {
+                Ok(NodeCapabilities::default())
+            }
+            Err(e) => Err(anyhow::anyhow!(e)),
+        }
+    }
+
+    async fn list_circuit_breakers(&self) -> anyhow::Result<Vec<NativeCircuitBreakerStatus>> {
+        let breakers = self.client.list_circuit_breakers().await.map_err(|e| anyhow::anyhow!(e))?;
+        Ok(breakers
+            .into_iter()
+            .map(|b| NativeCircuitBreakerStatus {
+                host: b.host,
+                state: circuit_breaker_state_label(b.state),
+                consecutive_successes: b.consecutive_successes,
+                consecutive_failures: b.consecutive_failures,
+                backoff_remaining_ms: b.backoff_remaining_ms,
+                recovery_progress_pct: b.recovery_progress_pct,
+            })
+            .collect())
+    }
+
+    async fn force_trip_circuit_breaker(&self, host: &str) -> anyhow::Result<()> {
+        self.client.force_trip_circuit_breaker(host).await.map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
+    }
+
+    async fn force_reset_circuit_breaker(&self, host: &str) -> anyhow::Result<()> {
+        self.client.force_reset_circuit_breaker(host).await.map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
     }
 
     async fn get_torrents(&self, _ids: Option<Vec<i64>>) -> anyhow::Result<Vec<Torrent>> {
@@ -511,6 +553,17 @@ impl TorrentClientTrait for SynapseClient {
     async fn replace_trackers(&self, _id: i64, _tracker_list: &str, _old_url: &str, _new_url: &str) -> anyhow::Result<()> {
         Ok(())
     }
+}
+
+fn circuit_breaker_state_label(state: i32) -> String {
+    use proto::v2::CircuitBreakerState;
+    match CircuitBreakerState::try_from(state).unwrap_or(CircuitBreakerState::CbHealthy) {
+        CircuitBreakerState::CbHealthy => "healthy",
+        CircuitBreakerState::CbTripped => "tripped",
+        CircuitBreakerState::CbHalfOpenCanary => "half_open_canary",
+        CircuitBreakerState::CbRecovering => "recovering",
+    }
+    .to_string()
 }
 
 pub struct SynapseDriverFactory;

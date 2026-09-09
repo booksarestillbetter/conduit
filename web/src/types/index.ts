@@ -157,6 +157,16 @@ export interface TrackerHealthStatus {
   last_announce_succeeded: boolean;
   affected_nodes: string[];
   is_circuit_broken: boolean;
+  /** 'active' = Conduit manages this tracker's breaker itself; 'passive' = a node's own
+   * native breaker is authoritative and Conduit just mirrors its status. */
+  breaker_mode: 'active' | 'passive';
+  /** Raw 4-state breaker vocabulary ('healthy' | 'tripped' | 'half_open_canary' |
+   * 'recovering'), present in both modes — distinct from `status`/`health_tier`, which
+   * stay in the older 5-tier vocabulary for backward compatibility with existing UI. */
+  cb_state?: string | null;
+  /** 0-100, only set while `cb_state` is 'recovering'. */
+  recovery_progress_pct?: number | null;
+  consecutive_successes?: number | null;
 }
 
 export interface SystemHealthOverview {
@@ -726,6 +736,15 @@ export interface TrackerCircuitBreakerConfig {
   error_patterns: string[];
   check_interval_secs: number;
   max_tripped_secs: number;
+  /** Initial cooldown (seconds) after tripping before the canary's recovery is checked,
+   * doubling on relapse (capped at max_tripped_secs). Active mode only. */
+  initial_backoff_secs: number;
+  /** How long (seconds), after a successful canary recovery, to stagger resumption of
+   * paused torrents before fully clearing the breaker. Active mode only. */
+  recovery_ramp_secs: number;
+  /** Consecutive successful canary checks required during the ramp window before full
+   * graduation to healthy. Active mode only. */
+  recovery_success_threshold: number;
 }
 
 export interface PlexScrobbleRecord {

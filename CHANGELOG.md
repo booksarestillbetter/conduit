@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.15.0] - 2026-09-09
+
+### Added
+
+- **Circuit Breaker Capability Negotiation & Passive Mode (`fetcher-core`, `fetcher-synapse`, `src/fetcher/pool.rs`, `src/engines/circuit_breaker.rs`)**:
+  - Conduit now auto-detects, per node, whether the backend daemon has its own native tracker circuit breaker (currently: Synapse's `tracker_circuit_breaker_v1`, via a new `GetCapabilities` gRPC RPC / `features` field on `GET /api/v1/health`), and switches that node's trackers into **passive mode** — Conduit stops managing them externally and instead mirrors the node's own breaker state into the existing dashboard/API surface (new `breaker_mode: "active" | "passive"` field on `TrackerHealthStatus`, alongside `cb_state` and `recovery_progress_pct`).
+  - Passive-mode overrides: `POST /api/system/circuit-breakers/{host}/trip` and `/reset` proxy through to the owning node's native breaker.
+  - Nodes without the capability (Transmission, qBittorrent, Deluge, or an older Synapse) keep running Conduit's own external breaker (**active mode**) exactly as before, unchanged behavior for anyone not on a capable Synapse build.
+  - `TorrentClientTrait` gained `get_capabilities`, `list_circuit_breakers`, `force_trip_circuit_breaker`, and `force_reset_circuit_breaker`, all with no-op default implementations — only `fetcher-synapse` overrides them for now.
+- **Active-Mode Circuit Breaker Ramp-Up & Backoff Doubling (`src/engines/circuit_breaker.rs`, `src/fetcher/models.rs`, `src/config/model.rs`)**:
+  - Conduit's own (active-mode) tracker breaker no longer resumes every paused torrent the instant a canary probe succeeds — it now enters a `Recovering` ramp phase, staggering resumption across a configurable window (`tracker_circuit_breaker.recovery_ramp_secs`, default 30s) and requiring a minimum number of consecutive successful canary checks (`recovery_success_threshold`, default 5) before declaring the tracker fully healthy.
+  - Any canary failure during `Recovering` immediately re-trips with doubled backoff (`initial_backoff_secs`, default 30s, capped at `max_tripped_secs`), mirroring Synapse's own fast-relapse-abort behavior.
+  - `ActiveCircuitBreaker` gained `state`, `recovery_started_at`, `consecutive_successes`, and `backoff_secs` fields, persisted across restarts via new `circuit_breakers` table columns (idempotent `ALTER TABLE` migration).
+
 ## [0.14.7] - 2026-09-07
 
 ### Added

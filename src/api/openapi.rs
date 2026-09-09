@@ -93,6 +93,8 @@ use utoipa::OpenApi;
         super::metrics_routes::prometheus_metrics,
         super::metrics_routes::get_system_stats,
         super::metrics_routes::get_system_health,
+        super::metrics_routes::force_trip_circuit_breaker,
+        super::metrics_routes::force_reset_circuit_breaker,
         super::metrics_routes::get_engine_health,
         super::metrics_routes::get_crash_log,
         super::ws::ws_handler,

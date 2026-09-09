@@ -451,6 +451,10 @@ impl Database {
         let _ = conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1", []);
         let _ = conn.execute("ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE plex_scrobbles ADD COLUMN source_node_name TEXT", []);
+        let _ = conn.execute("ALTER TABLE circuit_breakers ADD COLUMN state TEXT NOT NULL DEFAULT 'tripped'", []);
+        let _ = conn.execute("ALTER TABLE circuit_breakers ADD COLUMN recovery_started_at INTEGER", []);
+        let _ = conn.execute("ALTER TABLE circuit_breakers ADD COLUMN consecutive_successes INTEGER NOT NULL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE circuit_breakers ADD COLUMN backoff_secs INTEGER NOT NULL DEFAULT 0", []);
 
         // Retroactively heal previously misclassified audio grabs (e.g. grabbed via Sonarr before Lidarr routing)
         let _ = conn.execute(
@@ -1747,18 +1751,24 @@ impl Database {
         let conn = self.conn.lock();
         let paused_json = serde_json::to_string(&breaker.paused_torrents).unwrap_or_else(|_| "[]".to_string());
         let now = Utc::now().to_rfc3339();
+        let state = if breaker.state.is_empty() { "tripped" } else { &breaker.state };
         conn.execute(
             "INSERT INTO circuit_breakers (
                 tracker_host, canary_compound_id, canary_name, paused_torrents_json,
-                failing_error, tripped_at, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                failing_error, tripped_at, created_at, updated_at,
+                state, recovery_started_at, consecutive_successes, backoff_secs
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(tracker_host) DO UPDATE SET
                 canary_compound_id = excluded.canary_compound_id,
                 canary_name = excluded.canary_name,
                 paused_torrents_json = excluded.paused_torrents_json,
                 failing_error = excluded.failing_error,
                 tripped_at = excluded.tripped_at,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at,
+                state = excluded.state,
+                recovery_started_at = excluded.recovery_started_at,
+                consecutive_successes = excluded.consecutive_successes,
+                backoff_secs = excluded.backoff_secs",
             params![
                 breaker.tracker_host,
                 breaker.canary_compound_id,
@@ -1768,6 +1778,10 @@ impl Database {
                 breaker.tripped_at,
                 now,
                 now,
+                state,
+                breaker.recovery_started_at,
+                breaker.consecutive_successes,
+                breaker.backoff_secs,
             ],
         )?;
         Ok(())
@@ -1785,7 +1799,8 @@ impl Database {
     pub fn list_circuit_breakers(&self) -> anyhow::Result<Vec<crate::fetcher::ActiveCircuitBreaker>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT tracker_host, canary_compound_id, canary_name, paused_torrents_json, failing_error, tripped_at
+            "SELECT tracker_host, canary_compound_id, canary_name, paused_torrents_json, failing_error, tripped_at,
+                    state, recovery_started_at, consecutive_successes, backoff_secs
              FROM circuit_breakers ORDER BY tripped_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1795,6 +1810,10 @@ impl Database {
             let paused_json: String = row.get(3)?;
             let failing_error: String = row.get(4)?;
             let tripped_at: i64 = row.get(5)?;
+            let state: String = row.get(6)?;
+            let recovery_started_at: Option<i64> = row.get(7)?;
+            let consecutive_successes: u32 = row.get(8)?;
+            let backoff_secs: i64 = row.get(9)?;
             let paused_torrents: Vec<String> = serde_json::from_str(&paused_json).unwrap_or_default();
 
             Ok(crate::fetcher::ActiveCircuitBreaker {
@@ -1804,6 +1823,10 @@ impl Database {
                 paused_torrents,
                 failing_error,
                 tripped_at,
+                state,
+                recovery_started_at,
+                consecutive_successes,
+                backoff_secs,
             })
         })?;
 

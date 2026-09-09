@@ -151,6 +151,8 @@ pub fn build_api_router(state: AppState) -> Router {
         .route("/metrics", get(metrics_routes::prometheus_metrics))
         .route("/api/system/stats", get(metrics_routes::get_system_stats))
         .route("/api/system/health", get(metrics_routes::get_system_health))
+        .route("/api/system/circuit-breakers/{host}/trip", post(metrics_routes::force_trip_circuit_breaker))
+        .route("/api/system/circuit-breakers/{host}/reset", post(metrics_routes::force_reset_circuit_breaker))
         .route("/api/system/engines", get(metrics_routes::get_engine_health))
         .route("/api/system/crash-log", get(metrics_routes::get_crash_log))
 

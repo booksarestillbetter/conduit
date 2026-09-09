@@ -6,11 +6,17 @@ use super::models::{
 };
 use crate::config::AppConfig;
 use crate::downloader::traits::TorrentClientTrait;
+use fetcher_core::{NativeCircuitBreakerStatus, NodeCapabilities, RetrieverClientType};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
+
+/// How long a detected `NodeCapabilities` snapshot stays valid before re-probing — long
+/// enough to avoid an extra RPC on every poll tick, short enough that an in-place daemon
+/// upgrade/downgrade is picked up without restarting Conduit.
+const CAPABILITIES_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -38,6 +44,14 @@ pub struct FetcherPool {
     backoffs: RwLock<HashMap<String, NodeBackoff>>,
     active_breakers: RwLock<HashMap<String, ActiveCircuitBreaker>>,
     bandwidth_history: RwLock<VecDeque<BandwidthPoint>>,
+    /// In-memory only, deliberately not persisted to `FetcherNodeConfig` (see that struct's
+    /// `PartialEq`-based client-rebuild check) — re-detected on every poll cycle, keyed by
+    /// node name, value is `(capabilities, detected_at)`.
+    capabilities: RwLock<HashMap<String, (NodeCapabilities, Instant)>>,
+    /// Live native circuit breaker status for passive-mode nodes, keyed by node name.
+    /// Refreshed on every successful poll of that node (not TTL-throttled like
+    /// `capabilities` — this is the actual live status data the UI displays).
+    native_breakers: RwLock<HashMap<String, Vec<NativeCircuitBreakerStatus>>>,
 }
 
 impl Default for FetcherPool {
@@ -55,6 +69,8 @@ impl FetcherPool {
             backoffs: RwLock::new(HashMap::new()),
             active_breakers: RwLock::new(HashMap::new()),
             bandwidth_history: RwLock::new(VecDeque::with_capacity(300)),
+            capabilities: RwLock::new(HashMap::new()),
+            native_breakers: RwLock::new(HashMap::new()),
         }
     }
 
@@ -161,6 +177,69 @@ impl FetcherPool {
         self.list_clients()
     }
 
+    /// Re-detects a node's capabilities if the cached snapshot is missing or stale, and —
+    /// for nodes already known to be in passive mode — refreshes their live native breaker
+    /// status on every call. Cheap no-op for backends that don't override these trait
+    /// methods (the default impls return instantly with no I/O), but still gated on client
+    /// type to skip the calls — and the lock writes — entirely for backends that can never
+    /// have this.
+    async fn maybe_probe_capabilities(&self, node_name: &str, client: &Arc<dyn TorrentClientTrait>) {
+        if client.client_type() != RetrieverClientType::Synapse {
+            return;
+        }
+        let needs_probe = match self.capabilities.read().get(node_name) {
+            Some((_, detected_at)) => detected_at.elapsed() >= CAPABILITIES_TTL,
+            None => true,
+        };
+        if needs_probe {
+            if let Ok(caps) = client.get_capabilities().await {
+                self.capabilities.write().insert(node_name.to_string(), (caps, Instant::now()));
+            }
+        }
+
+        if self.is_passive_mode(node_name) {
+            if let Ok(breakers) = client.list_circuit_breakers().await {
+                self.native_breakers.write().insert(node_name.to_string(), breakers);
+            }
+        } else {
+            self.native_breakers.write().remove(node_name);
+        }
+    }
+
+    /// The most recently detected capabilities for a node, or an all-`false` default if
+    /// it hasn't been probed yet (e.g. right after startup, before the first successful
+    /// poll).
+    pub fn get_node_capabilities(&self, node_name: &str) -> NodeCapabilities {
+        self.capabilities
+            .read()
+            .get(node_name)
+            .map(|(caps, _)| *caps)
+            .unwrap_or_default()
+    }
+
+    /// True if this node's own daemon should be trusted to manage its tracker circuit
+    /// breaker itself (Conduit reads/displays/overrides, but doesn't independently pause
+    /// or resume torrents on it).
+    pub fn is_passive_mode(&self, node_name: &str) -> bool {
+        self.get_node_capabilities(node_name).native_tracker_circuit_breaker
+    }
+
+    /// The most recently fetched native breaker status list for a passive-mode node.
+    /// Empty for active-mode nodes or nodes that haven't been probed yet.
+    pub fn get_native_breakers(&self, node_name: &str) -> Vec<NativeCircuitBreakerStatus> {
+        self.native_breakers.read().get(node_name).cloned().unwrap_or_default()
+    }
+
+    /// All passive-mode nodes' native breaker statuses, flattened to `(node_name, status)`
+    /// pairs.
+    pub fn get_all_native_breakers(&self) -> Vec<(String, NativeCircuitBreakerStatus)> {
+        self.native_breakers
+            .read()
+            .iter()
+            .flat_map(|(node, list)| list.iter().map(move |s| (node.clone(), s.clone())))
+            .collect()
+    }
+
     pub async fn poll_node(&self, client: Arc<dyn TorrentClientTrait>) -> anyhow::Result<()> {
         let node_name = client.node_name().to_string();
 
@@ -205,6 +284,8 @@ impl FetcherPool {
                         last_latency: latency,
                     });
                 }
+
+                self.maybe_probe_capabilities(&node_name, &client).await;
 
                 let free_space_path = torrents
                     .first()
@@ -786,7 +867,79 @@ impl FetcherPool {
             let mut nodes_vec: Vec<String> = affected_nodes.into_iter().collect();
             nodes_vec.sort();
 
-            if let Some(breaker) = breakers.get(host) {
+            // Passive mode: every node touching this tracker host manages its own native
+            // breaker, so Conduit mirrors that status instead of computing its own. A host
+            // shared with at least one active-mode node stays under Conduit's management
+            // below (so that node's torrents don't go unmanaged).
+            let all_passive = !nodes_vec.is_empty() && nodes_vec.iter().all(|n| self.is_passive_mode(n));
+            let native_status = if all_passive {
+                nodes_vec.iter().find_map(|n| {
+                    self.native_breakers
+                        .read()
+                        .get(n)
+                        .and_then(|list| list.iter().find(|s| s.host == *host).cloned())
+                })
+            } else {
+                None
+            };
+
+            if let Some(native) = native_status {
+                let is_broken = native.state != "healthy";
+                if is_broken {
+                    circuit_broken_count += 1;
+                }
+                // Map the native 4-state vocabulary onto the existing status/health_tier
+                // vocabulary the dashboard already understands; the precise native state
+                // lives in the new `cb_state` field alongside it.
+                let mapped_status = match native.state.as_str() {
+                    "healthy" => "healthy",
+                    "recovering" => "warning",
+                    _ => "circuit_broken", // tripped, half_open_canary
+                };
+                tracker_health.push(TrackerHealthStatus {
+                    host: host.clone(),
+                    status: mapped_status.to_string(),
+                    total_torrents: t_list.len(),
+                    online_torrents: t_list.len(),
+                    error_torrents: if is_broken { t_list.len() } else { 0 },
+                    error_ratio: if is_broken { 1.0 } else { 0.0 },
+                    health_tier: mapped_status.to_string(),
+                    paused_torrents: 0,
+                    active_probe_id: None,
+                    active_probe_name: None,
+                    last_announce_result: format!("Managed natively by {}", nodes_vec.join(", ")),
+                    last_announce_succeeded: !is_broken,
+                    affected_nodes: nodes_vec,
+                    is_circuit_broken: is_broken,
+                    breaker_mode: "passive".to_string(),
+                    cb_state: Some(native.state),
+                    recovery_progress_pct: native.recovery_progress_pct,
+                    consecutive_successes: Some(native.consecutive_successes),
+                });
+            } else if all_passive {
+                // Passive-mode node(s) that haven't reported a status for this host yet
+                // (not currently tracked by its breaker, i.e. implicitly healthy).
+                tracker_health.push(TrackerHealthStatus {
+                    host: host.clone(),
+                    status: "healthy".to_string(),
+                    total_torrents: t_list.len(),
+                    online_torrents: t_list.len(),
+                    error_torrents: 0,
+                    error_ratio: 0.0,
+                    health_tier: "healthy".to_string(),
+                    paused_torrents: 0,
+                    active_probe_id: None,
+                    active_probe_name: None,
+                    last_announce_result: format!("Managed natively by {}", nodes_vec.join(", ")),
+                    last_announce_succeeded: true,
+                    affected_nodes: nodes_vec,
+                    is_circuit_broken: false,
+                    breaker_mode: "passive".to_string(),
+                    cb_state: Some("healthy".to_string()),
+                    recovery_progress_pct: None,
+                    consecutive_successes: None,
+                });
+            } else if let Some(breaker) = breakers.get(host) {
                 circuit_broken_count += 1;
 
                 // Find active canary probe announce result
@@ -820,6 +973,10 @@ impl FetcherPool {
                     last_announce_succeeded: announce_succ,
                     affected_nodes: nodes_vec,
                     is_circuit_broken: true,
+                    breaker_mode: "active".to_string(),
+                    cb_state: Some(if breaker.state.is_empty() { "tripped".to_string() } else { breaker.state.clone() }),
+                    recovery_progress_pct: None,
+                    consecutive_successes: Some(breaker.consecutive_successes),
                 });
             } else {
                 let total = t_list.len();
@@ -886,6 +1043,10 @@ impl FetcherPool {
                     last_announce_succeeded: succ,
                     affected_nodes: nodes_vec,
                     is_circuit_broken: false,
+                    breaker_mode: "active".to_string(),
+                    cb_state: None,
+                    recovery_progress_pct: None,
+                    consecutive_successes: None,
                 });
             }
         }
