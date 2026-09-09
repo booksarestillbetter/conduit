@@ -1,0 +1,15 @@
+[package]
+name = "fetcher-core"
+version = "0.14.7"
+edition = "2021"
+description = "Core SPI, canonical torrent models, and driver registry for Conduit/Conduit fetchers"
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+utoipa = { version = "5.3", features = ["chrono", "uuid"] }
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+parking_lot = "0.12"

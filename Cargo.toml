@@ -1,0 +1,91 @@
+[package]
+name = "conduit"
+version = "0.14.7"
+edition = "2021"
+authors = ["Conduit Team"]
+description = "Conduit - Unified Media Fetching Commander, Media Replacer & Staging Sync Daemon"
+
+[workspace]
+members = [
+    ".",
+    "crates/fetcher-core",
+    "crates/fetcher-transmission",
+    "crates/fetcher-qbittorrent",
+    "crates/fetcher-deluge",
+    "crates/fetcher-synapse",
+]
+
+[dependencies]
+# Fetcher Driver Workspace Crates
+fetcher-core = { path = "crates/fetcher-core" }
+fetcher-transmission = { path = "crates/fetcher-transmission", optional = true }
+fetcher-qbittorrent = { path = "crates/fetcher-qbittorrent", optional = true }
+fetcher-deluge = { path = "crates/fetcher-deluge", optional = true }
+fetcher-synapse = { path = "crates/fetcher-synapse", optional = true }
+
+# Web Framework & Async
+tokio = { version = "1.43", features = ["full"] }
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs", "compression-gzip"] }
+
+# Serialization & Models
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI & Configuration
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Security & Crypto
+argon2 = { version = "0.5", features = ["std"] }
+jsonwebtoken = "9.3"
+rand = "0.9"
+base64 = "0.22"
+aes-gcm = "0.10"
+sha2 = "0.10"
+sha1 = "0.10"
+subtle = "2.6"
+password-hash = "0.5"
+
+# Database (SQLCipher Encrypted SQLite)
+rusqlite = { version = "0.33", features = ["bundled-sqlcipher", "chrono", "uuid"] }
+parking_lot = "0.12"
+
+# Networking & HTTP Clients
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+
+# Time & UUID
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.13", features = ["v4", "serde"] }
+
+# Utilities
+flate2 = "1.0"
+regex = "1.11"
+urlencoding = "2.1"
+sysinfo = "0.33"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+futures-util = "0.3"
+anyhow = "1.0"
+thiserror = "2.0"
+mime_guess = "2.0"
+rust-embed = "8.5"
+walkdir = "2.5"
+
+# OpenAPI Docs
+utoipa = { version = "5.3", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+
+[features]
+default = ["synapse", "transmission", "qbittorrent", "deluge"]
+synapse = ["dep:fetcher-synapse"]
+transmission = ["dep:fetcher-transmission"]
+qbittorrent = ["dep:fetcher-qbittorrent"]
+deluge = ["dep:fetcher-deluge"]
+
+[build-dependencies]
+
+[dev-dependencies]
+tempfile = "3.17"

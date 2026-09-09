@@ -1,0 +1,11 @@
+/target
+node_modules
+web/node_modules
+web/dist
+data/
+3rd/
+attic/
+tmp/
+*.DS_Store
+.env
+

@@ -1,0 +1,27 @@
+services:
+  conduit:
+    image: booksarestillbetter/conduit:${TAG:-latest}
+    container_name: conduit
+    restart: unless-stopped
+    network_mode: "host"
+    environment:
+      - CONDUIT_BIND=0.0.0.0
+      - CONDUIT_PORT=4242
+      - CONDUIT_HTTP_PORT=4242
+      - CONDUIT_HTTPS_PORT=443
+      # SSL Mode: 'auto' (detects cert in /data/ssl), 'true', or 'false'
+      - CONDUIT_SSL_ENABLED=auto
+      # Set to 'true' to redirect HTTP to HTTPS when ports differ
+      - CONDUIT_SSL_REDIRECT=false
+      - CONDUIT_LOG=info
+      - TZ=${TZ:-UTC}
+    volumes:
+      # Data directory — holds db.sqlite, config.json, and an optional ssl/ directory for certs
+      - ${CONDUIT_DATA_DIR:-./data}:/data
+      # Queue directory — where classified downloads get staged/hardlinked for pickup
+      - ${CONDUIT_QUEUE_DIR:-./queue}:/queue
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:4242/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
