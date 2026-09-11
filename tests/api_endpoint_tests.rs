@@ -24,6 +24,7 @@ struct TestContext {
     jwt_secret: String,
     db: Database,
     pool: Arc<FetcherPool>,
+    config_mgr: ConfigManager,
     _tmp_db: NamedTempFile,
     _tmp_cfg: NamedTempFile,
 }
@@ -150,7 +151,7 @@ async fn setup_test_context() -> TestContext {
     );
 
     let state = AppState {
-        config: config_mgr,
+        config: config_mgr.clone(),
         db: db.clone(),
         fetcher_pool: pool.clone(),
         notifiers,
@@ -171,6 +172,7 @@ async fn setup_test_context() -> TestContext {
         jwt_secret,
         db,
         pool,
+        config_mgr,
         _tmp_db: tmp_db,
         _tmp_cfg: tmp_cfg,
     }
@@ -361,7 +363,10 @@ async fn test_sync_classification_and_events_endpoints() {
         "node": "test_node",
         "queue": "/media/queue/tvUHDqueue"
     });
-    let resp = send_request(&ctx.router, Method::POST, "/api/sync/notify-download", None, Some(notify_payload)).await;
+    let unauth_resp = send_request(&ctx.router, Method::POST, "/api/sync/notify-download", None, Some(notify_payload.clone())).await;
+    assert_eq!(unauth_resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = send_request(&ctx.router, Method::POST, "/api/sync/notify-download", Some(&ctx.admin_token), Some(notify_payload)).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     // 4. GET /api/sync/hook-script (Generates bash staging script)
@@ -470,6 +475,64 @@ async fn test_system_health_and_metrics_endpoints() {
     assert_eq!(broken_tracker.unwrap()["is_circuit_broken"], true);
     assert_eq!(broken_tracker.unwrap()["paused_torrents"], 1);
     assert_eq!(broken_tracker.unwrap()["active_probe_name"], "Canary.Probe.Release");
+
+    // 5. GET /api/system/crash-log requires auth (leaks internal file paths + backtraces)
+    let unauth_resp = send_request(&ctx.router, Method::GET, "/api/system/crash-log", None, None).await;
+    assert_eq!(unauth_resp.status(), StatusCode::UNAUTHORIZED);
+    let resp = send_request(&ctx.router, Method::GET, "/api/system/crash-log", Some(&ctx.admin_token), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_bazarr_overseerr_jellyfin_webhook_secret_enforcement() {
+    let ctx = setup_test_context().await;
+
+    // No secret configured yet: unauthenticated requests are accepted (matches the
+    // existing Sonarr/Radarr/Lidarr/Ombi fail-open-when-unconfigured convention).
+    let resp = send_request(&ctx.router, Method::POST, "/api/bazarr/inbound", None, Some(json!({"eventType": "Download", "seriesTitle": "Test Show"}))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Configure secrets for all three, then confirm each rejects a request with no/wrong
+    // secret and accepts one with the right one.
+    let mut config = ctx.config_mgr.get().await;
+    config.bazarr.webhook_secret = Some("bazarr-secret".to_string());
+    config.overseerr.webhook_secret = Some("overseerr-secret".to_string());
+    config.jellyfin.webhook_secret = Some("jellyfin-secret".to_string());
+    ctx.config_mgr.update(config).await.unwrap();
+
+    let cases: [(&str, &str, Value); 3] = [
+        ("/api/bazarr/inbound", "bazarr-secret", json!({"eventType": "Download", "seriesTitle": "Test Show"})),
+        ("/api/overseerr/inbound", "overseerr-secret", json!({"notification_type": "MEDIA_PENDING", "subject": "Test Movie"})),
+        ("/api/jellyfin/inbound", "jellyfin-secret", json!({"NotificationType": "PlaybackStart", "Name": "Test Item"})),
+    ];
+
+    for (path, secret, payload) in cases {
+        // No secret header at all.
+        let resp = send_request(&ctx.router, Method::POST, path, None, Some(payload.clone())).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{path} should reject a request with no webhook secret");
+
+        // Wrong secret.
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("X-Webhook-Secret", "wrong-secret")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let resp = ctx.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{path} should reject the wrong webhook secret");
+
+        // Correct secret.
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("X-Webhook-Secret", secret)
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let resp = ctx.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{path} should accept the correct webhook secret");
+    }
 }
 
 #[tokio::test]

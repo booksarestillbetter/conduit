@@ -267,8 +267,18 @@ impl TransmissionClient {
         Ok(())
     }
 
-    pub async fn set_sequential_download(&self, ids: &[i64], _enabled: bool) -> anyhow::Result<()> {
-        let _ = ids;
+    /// `sequentialDownload` is a Transmission 4.1.0+ (`rpc-version-semver` 6.0.0+) `torrent-set`
+    /// argument. Transmission's RPC server ignores unrecognized `torrent-set` arguments rather
+    /// than erroring, so this is a safe no-op against an older daemon rather than a failure --
+    /// there is no reliable way to distinguish "ignored" from "applied" without also comparing
+    /// `torrent-get`'s echoed `sequentialDownload` field, which isn't worth the extra round-trip
+    /// for a best-effort toggle.
+    pub async fn set_sequential_download(&self, ids: &[i64], enabled: bool) -> anyhow::Result<()> {
+        let args = json!({
+            "ids": ids,
+            "sequentialDownload": enabled,
+        });
+        self.send_rpc("torrent-set", Some(args)).await?;
         Ok(())
     }
 
@@ -447,7 +457,18 @@ impl TorrentClientTrait for TransmissionAdapter {
         self.inner.test_port().await
     }
 
-    async fn replace_trackers(&self, _id: i64, _tracker_list: &str, _old_url: &str, _new_url: &str) -> anyhow::Result<()> {
+    /// Uses `trackerList` (Transmission 4.0.0+, `rpc-version-semver` 5.3.0+), the non-deprecated
+    /// full-announce-list replacement mechanism -- `trackerAdd`/`trackerRemove`/`trackerReplace`
+    /// are all deprecated in favor of it. `tracker_list` is the caller's already-computed,
+    /// post-replacement announce list (newline-separated, blank line between tiers), so this is
+    /// a direct `torrent-set` call with no extra lookup needed. Ignored (not an error) by an
+    /// older daemon, same caveat as `set_sequential_download` above.
+    async fn replace_trackers(&self, id: i64, tracker_list: &str, _old_url: &str, _new_url: &str) -> anyhow::Result<()> {
+        let args = json!({
+            "ids": [id],
+            "trackerList": tracker_list,
+        });
+        self.inner.send_rpc("torrent-set", Some(args)).await?;
         Ok(())
     }
 }

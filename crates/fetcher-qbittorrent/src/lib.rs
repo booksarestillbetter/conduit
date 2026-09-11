@@ -527,9 +527,18 @@ impl TorrentClientTrait for QBittorrentClient {
         Ok(())
     }
 
-    async fn set_sequential_download(&self, ids: &[i64], _enabled: bool) -> anyhow::Result<()> {
+    /// qBittorrent only exposes a toggle (`toggleSequentialDownload`), not an explicit
+    /// "set to X" endpoint, so `enabled` is honored by comparing against each torrent's
+    /// current `seq_dl` state first and only toggling the ones that actually need to
+    /// change -- calling the toggle unconditionally (the previous behavior) would flip
+    /// an already-correct torrent to the *wrong* state instead of leaving it alone.
+    async fn set_sequential_download(&self, ids: &[i64], enabled: bool) -> anyhow::Result<()> {
         let torrents = self.get_torrents(None).await?;
-        let hashes: Vec<String> = torrents.into_iter().filter(|t| ids.contains(&t.id)).map(|t| t.hash_string).collect();
+        let hashes: Vec<String> = torrents
+            .into_iter()
+            .filter(|t| ids.contains(&t.id) && t.sequential_download != enabled)
+            .map(|t| t.hash_string)
+            .collect();
         if hashes.is_empty() {
             return Ok(());
         }
@@ -544,13 +553,22 @@ impl TorrentClientTrait for QBittorrentClient {
         Ok(json!({ "result": "success" }))
     }
 
-    async fn set_turtle_mode(&self, _enabled: bool) -> anyhow::Result<()> {
-        self.send_api_post("/api/v2/transfer/toggleSpeedLimitsMode", &[]).await?;
+    /// qBittorrent only exposes a toggle (`toggleSpeedLimitsMode`), not an explicit "set
+    /// to X" endpoint, so `enabled` is honored by checking the current mode via
+    /// `speedLimitsMode` first and only toggling when it doesn't already match -- calling
+    /// the toggle unconditionally (the previous behavior) could just as easily turn
+    /// turtle mode *off* on an "enable" call as turn it on, depending on prior state.
+    async fn set_turtle_mode(&self, enabled: bool) -> anyhow::Result<()> {
+        let resp = self.send_api_get("/api/v2/transfer/speedLimitsMode", &[]).await?;
+        let current = resp.text().await.unwrap_or_default().trim() == "1";
+        if current != enabled {
+            self.send_api_post("/api/v2/transfer/toggleSpeedLimitsMode", &[]).await?;
+        }
         Ok(())
     }
 
     async fn update_blocklist(&self) -> anyhow::Result<i64> {
-        Ok(0)
+        anyhow::bail!("qBittorrent has no built-in blocklist RPC")
     }
 
     async fn get_free_space(&self, _path: &str) -> anyhow::Result<i64> {

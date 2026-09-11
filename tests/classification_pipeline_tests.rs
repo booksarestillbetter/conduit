@@ -20,8 +20,10 @@ async fn test_four_tier_classification_pipeline() {
     let tmp_cfg = NamedTempFile::new().unwrap();
     let cfg_path = tmp_cfg.path().to_str().unwrap().to_string();
 
+    let jwt_secret = "test-classification-pipeline-jwt-secret".to_string();
     let mut config = AppConfig::default();
-    
+    config.system.jwt_secret = jwt_secret.clone();
+
     // Add custom media type
     config.queue_routing.media_types.push(MediaTypeDefinition {
         id: "anime".to_string(),
@@ -89,6 +91,9 @@ async fn test_four_tier_classification_pipeline() {
     };
 
     let router = build_api_router(state);
+
+    let admin = db.create_user("admin", &conduit::auth::hash_password("AdminPass123").unwrap(), true).unwrap();
+    let admin_token = conduit::auth::create_jwt(&admin.id, &admin.username, true, admin.token_version, &jwt_secret, 7).unwrap();
 
     // 1. Tier 1 Test: Exact Arr Grab Association
     let grab = ArrGrabRecord {
@@ -275,6 +280,7 @@ async fn test_four_tier_classification_pipeline() {
         .method("POST")
         .uri("/api/sync/notify-download")
         .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .body(Body::from(r#"{
             "name": "Severance.S02E01.1080p.WEB-DL",
             "hash": "grab-001",

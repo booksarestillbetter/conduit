@@ -1063,6 +1063,21 @@ export const Settings: React.FC = () => {
                       />
                       <span>Auto-resume all on recovery</span>
                     </label>
+                    <label className="flex items-center space-x-2 text-xs text-slate-300 cursor-pointer" title="When off, a tripped tracker stays tripped until its cooldown fully elapses — no canary probe request is sent to test recovery early.">
+                      <input
+                        type="checkbox"
+                        checked={config.tracker_circuit_breaker?.canary_probe_enabled ?? true}
+                        onChange={(e) => {
+                          const currentCb = config.tracker_circuit_breaker ?? DEFAULT_TRACKER_CB_CONFIG;
+                          setConfig({
+                            ...config,
+                            tracker_circuit_breaker: { ...currentCb, canary_probe_enabled: e.target.checked },
+                          });
+                        }}
+                        className="rounded border-slate-700 bg-slate-800 text-amber-500 focus:ring-amber-500"
+                      />
+                      <span>Canary probe recovery</span>
+                    </label>
                   </div>
                 </div>
 

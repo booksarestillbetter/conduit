@@ -1,6 +1,6 @@
 # Conduit
 [![Rust Build](https://github.com/booksarestillbetter/conduit/actions/workflows/rust.yml/badge.svg)](https://github.com/booksarestillbetter/conduit/actions/workflows/rust.yml)
-[![Version 0.15.0](https://img.shields.io/badge/version-0.15.0-blue.svg)](CHANGELOG.md)
+[![Version 0.16.0](https://img.shields.io/badge/version-0.16.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **A unified, multi-node fetcher control plane (Synapse, Transmission, qBittorrent, Deluge) and Sonarr/Radarr/Lidarr/Plex media lifecycle automation daemon — written in Rust, with a React + Tailwind web UI.**

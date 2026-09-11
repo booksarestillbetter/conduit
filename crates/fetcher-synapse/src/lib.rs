@@ -461,16 +461,22 @@ impl TorrentClientTrait for SynapseClient {
         Ok(())
     }
 
+    // Synapse's gRPC surface (its canonical `synapse-proto/proto/synapse.proto`)
+    // has no RPC for queue position, sequential download, path renaming, or tracker
+    // replacement -- there is nothing to call for any of these four, on any Synapse
+    // daemon version. Returning a clear "unsupported" error is honest about that; the
+    // previous `Ok(())`/fabricated-success-JSON behavior looked identical, from the
+    // caller's side, to the operation having actually happened.
     async fn queue_move(&self, _ids: &[i64], _direction: &str) -> anyhow::Result<()> {
-        Ok(())
+        anyhow::bail!("Synapse has no queue-position RPC; torrents cannot be reordered on this backend")
     }
 
     async fn set_sequential_download(&self, _ids: &[i64], _enabled: bool) -> anyhow::Result<()> {
-        Ok(())
+        anyhow::bail!("Synapse has no sequential-download RPC")
     }
 
     async fn rename_path(&self, _id: i64, _path: &str, _new_name: &str) -> anyhow::Result<serde_json::Value> {
-        Ok(json!({ "result": "success" }))
+        anyhow::bail!("Synapse has no file/folder rename RPC")
     }
 
     async fn set_turtle_mode(&self, enabled: bool) -> anyhow::Result<()> {
@@ -479,7 +485,7 @@ impl TorrentClientTrait for SynapseClient {
     }
 
     async fn update_blocklist(&self) -> anyhow::Result<i64> {
-        Ok(0)
+        anyhow::bail!("Synapse has no built-in blocklist RPC; use its own IP filter config instead")
     }
 
     async fn get_free_space(&self, _path: &str) -> anyhow::Result<i64> {
@@ -551,7 +557,7 @@ impl TorrentClientTrait for SynapseClient {
     }
 
     async fn replace_trackers(&self, _id: i64, _tracker_list: &str, _old_url: &str, _new_url: &str) -> anyhow::Result<()> {
-        Ok(())
+        anyhow::bail!("Synapse has no tracker-replace RPC")
     }
 }
 

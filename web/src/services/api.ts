@@ -841,7 +841,7 @@ export async function sendOmbiWebhookTest(): Promise<any> {
 export async function moveTorrentQueue(compoundId: string, direction: 'top' | 'up' | 'down' | 'bottom'): Promise<{ status: string; direction: string }> {
   const res = await apiFetch(`${API_BASE}/api/torrents/${encodeURIComponent(compoundId)}/queue-move`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ direction }),
   });
   if (!res.ok) throw new Error(`Failed to move torrent queue (${direction})`);
@@ -851,7 +851,7 @@ export async function moveTorrentQueue(compoundId: string, direction: 'top' | 'u
 export async function moveBulkQueue(compoundIds: string[], direction: 'top' | 'up' | 'down' | 'bottom'): Promise<{ moved_torrents: number }> {
   const res = await apiFetch(`${API_BASE}/api/torrents/queue-move`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ compound_ids: compoundIds, direction }),
   });
   if (!res.ok) throw new Error(`Failed to execute bulk queue move (${direction})`);
@@ -861,7 +861,7 @@ export async function moveBulkQueue(compoundIds: string[], direction: 'top' | 'u
 export async function setSequentialDownload(compoundId: string, enabled: boolean): Promise<{ sequential_download: boolean }> {
   const res = await apiFetch(`${API_BASE}/api/torrents/${encodeURIComponent(compoundId)}/sequential-download`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ enabled }),
   });
   if (!res.ok) throw new Error('Failed to update sequential download');
@@ -871,7 +871,7 @@ export async function setSequentialDownload(compoundId: string, enabled: boolean
 export async function renameTorrentPath(compoundId: string, path: string, newName: string): Promise<{ path: string; new_name: string }> {
   const res = await apiFetch(`${API_BASE}/api/torrents/${encodeURIComponent(compoundId)}/rename-path`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ path, new_name: newName }),
   });
   if (!res.ok) throw new Error('Failed to rename torrent path');
@@ -881,7 +881,7 @@ export async function renameTorrentPath(compoundId: string, path: string, newNam
 export async function batchReplaceTrackers(payload: { node?: string; compound_ids?: string[]; old_url: string; new_url: string }): Promise<{ replaced_torrents: number }> {
   const res = await apiFetch(`${API_BASE}/api/torrents/batch-replace-trackers`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error('Failed to replace trackers');
@@ -891,7 +891,7 @@ export async function batchReplaceTrackers(payload: { node?: string; compound_id
 export async function toggleTurtleMode(nodeName: string, enabled: boolean): Promise<{ alt_speed_enabled: boolean }> {
   const res = await apiFetch(`${API_BASE}/api/nodes/${encodeURIComponent(nodeName)}/turtle-mode`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ enabled }),
   });
   if (!res.ok) throw new Error('Failed to toggle turtle mode');
@@ -901,7 +901,7 @@ export async function toggleTurtleMode(nodeName: string, enabled: boolean): Prom
 export async function toggleTurtleModeAll(enabled: boolean): Promise<{ alt_speed_enabled: boolean; updated_nodes: string[] }> {
   const res = await apiFetch(`${API_BASE}/api/nodes/turtle-mode`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ enabled }),
   });
   if (!res.ok) throw new Error('Failed to toggle global turtle mode');
@@ -911,6 +911,7 @@ export async function toggleTurtleModeAll(enabled: boolean): Promise<{ alt_speed
 export async function updateNodeBlocklist(nodeName: string): Promise<{ blocklist_size: number; message: string }> {
   const res = await apiFetch(`${API_BASE}/api/nodes/${encodeURIComponent(nodeName)}/blocklist-update`, {
     method: 'POST',
+    headers: getAuthHeaders(),
   });
   if (!res.ok) throw new Error('Failed to update node blocklist');
   return res.json();

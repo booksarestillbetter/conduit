@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use fetcher_core::{
     FetcherDriverFactory, FetcherNodeConfig, RetrieverClientType, Torrent, TorrentClientTrait,
-    TrackerStat,
+    TorrentFile, TrackerStat,
 };
 use parking_lot::RwLock;
 use serde_json::{json, Value};
@@ -136,6 +136,30 @@ impl DelugeClient {
         let num_seeds = obj.get("num_seeds").and_then(|v| v.as_i64()).unwrap_or(0);
         let num_peers = obj.get("num_peers").and_then(|v| v.as_i64()).unwrap_or(0);
 
+        // "files" ({index, path, size, offset} per Deluge's Torrent.get_files) and
+        // "file_progress" (a flat list of 0.0-1.0 fractions, indexed identically to
+        // "files") are only present when explicitly requested -- see
+        // `get_torrent_details_by_hash`, the only caller that asks for them.
+        let files = obj.get("files").and_then(|v| v.as_array()).map(|files_arr| {
+            let progress_arr = obj.get("file_progress").and_then(|v| v.as_array());
+            files_arr
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let length = f.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let frac = progress_arr
+                        .and_then(|p| p.get(i))
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    TorrentFile {
+                        name: f.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        bytes_completed: (length as f64 * frac) as i64,
+                        length,
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+
         let (status_code, error_str) = match state {
             "Downloading" => (4, None),
             "Seeding" => (6, None),
@@ -190,7 +214,7 @@ impl DelugeClient {
             download_dir: save_path,
             tracker_stats,
             queue_position: 0,
-            files: None,
+            files,
             peers: None,
             comment: None,
             creator: None,
@@ -255,7 +279,7 @@ impl TorrentClientTrait for DelugeClient {
         let fields = vec![
             "name", "hash", "state", "progress", "upload_payload_rate", "download_payload_rate",
             "total_uploaded", "total_done", "total_size", "tracker_status", "trackers",
-            "save_path", "time_added", "num_seeds", "num_peers", "files", "peers", "ratio", "eta",
+            "save_path", "time_added", "num_seeds", "num_peers", "files", "file_progress", "peers", "ratio", "eta",
         ];
 
         let result = self.send_rpc("core.get_torrent_status", json!([hash, fields])).await?;
@@ -384,6 +408,9 @@ impl TorrentClientTrait for DelugeClient {
     async fn queue_move(&self, ids: &[i64], direction: &str) -> anyhow::Result<()> {
         let torrents = self.get_torrents(None).await?;
         let hashes: Vec<String> = torrents.into_iter().filter(|t| ids.contains(&t.id)).map(|t| t.hash_string).collect();
+        if hashes.is_empty() {
+            return Ok(());
+        }
         let method = match direction.to_lowercase().as_str() {
             "top" => "core.queue_top",
             "up" => "core.queue_up",
@@ -391,26 +418,57 @@ impl TorrentClientTrait for DelugeClient {
             "bottom" => "core.queue_bottom",
             other => return Err(anyhow::anyhow!("Invalid queue direction {}", other)),
         };
-        for hash in hashes {
-            let _ = self.send_rpc(method, json!([[hash]])).await;
+        // A single batched call (Deluge natively accepts the whole hash list) rather than
+        // one RPC per torrent -- besides being slower, moving a multi-selection one torrent
+        // at a time doesn't preserve their relative order the way a real batch move does,
+        // and silently swallowing a per-call failure (the previous `let _ =` loop) hid any
+        // torrent that failed to move from the caller entirely.
+        self.send_rpc(method, json!([hashes])).await?;
+        Ok(())
+    }
+
+    /// `sequential_download` is a per-torrent option under Deluge's generic
+    /// `core.set_torrent_options(torrent_ids, options)` RPC (see `torrent.TorrentOptions`).
+    async fn set_sequential_download(&self, ids: &[i64], enabled: bool) -> anyhow::Result<()> {
+        let torrents = self.get_torrents(None).await?;
+        let hashes: Vec<String> = torrents.into_iter().filter(|t| ids.contains(&t.id)).map(|t| t.hash_string).collect();
+        if hashes.is_empty() {
+            return Ok(());
         }
+        self.send_rpc("core.set_torrent_options", json!([hashes, {"sequential_download": enabled}])).await?;
         Ok(())
     }
 
-    async fn set_sequential_download(&self, _ids: &[i64], _enabled: bool) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn rename_path(&self, _id: i64, _path: &str, _new_name: &str) -> anyhow::Result<Value> {
+    /// Deluge splits file/folder renaming into two distinct RPCs: `core.rename_files`
+    /// (by file index) and `core.rename_folder` (by current/new folder path string).
+    /// `path` here is always a single file's current in-torrent relative path (the only
+    /// caller is the per-file rename control in the torrent details UI, which lists
+    /// individual files) -- so this resolves `path` to its file index via the same
+    /// `files` listing `get_torrent_details_by_hash` now populates, then renames by index.
+    async fn rename_path(&self, id: i64, path: &str, new_name: &str) -> anyhow::Result<Value> {
+        let torrent = self.get_torrent_details(id).await?;
+        let details = self.get_torrent_details_by_hash(&torrent.hash_string).await?;
+        let files = details.files.unwrap_or_default();
+        let index = files
+            .iter()
+            .position(|f| f.name == path)
+            .ok_or_else(|| anyhow::anyhow!("No file matching path '{}' found in torrent", path))?;
+        self.send_rpc("core.rename_files", json!([torrent.hash_string, [[index, new_name]]])).await?;
         Ok(json!({ "result": "success" }))
     }
 
+    /// Unlike Transmission/qBittorrent, Deluge's core RPC has no built-in alternate-speed
+    /// ("turtle mode") toggle -- only raw `max_download_speed`/`max_upload_speed` config
+    /// values, with no remembered secondary "alt" limit pair to swap to/from. Implementing
+    /// an equivalent would mean inventing new per-node "turtle speed" config that doesn't
+    /// exist anywhere in Conduit today; returning a clear error here is honest about that
+    /// gap instead of silently doing nothing while a UI toggle claims success.
     async fn set_turtle_mode(&self, _enabled: bool) -> anyhow::Result<()> {
-        Ok(())
+        anyhow::bail!("Deluge has no native turtle-mode / alternate-speed toggle; use per-node bandwidth limits instead")
     }
 
     async fn update_blocklist(&self) -> anyhow::Result<i64> {
-        Ok(0)
+        anyhow::bail!("Deluge has no built-in blocklist RPC; use the Blocklist plugin's own settings instead")
     }
 
     async fn get_free_space(&self, path: &str) -> anyhow::Result<i64> {
@@ -435,7 +493,21 @@ impl TorrentClientTrait for DelugeClient {
         Ok(true)
     }
 
-    async fn replace_trackers(&self, _id: i64, _tracker_list: &str, _old_url: &str, _new_url: &str) -> anyhow::Result<()> {
+    /// `tracker_list` is the caller's already-computed, post-replacement announce list --
+    /// each line its own tier (see the caller in `src/api/torrent_routes.rs`). Deluge's
+    /// `core.set_torrent_trackers` wants `[{"url", "tier"}]` rather than a flat string, so
+    /// this just re-splits it back into that shape, assigning each line its own tier index
+    /// (consistent with how the caller built it).
+    async fn replace_trackers(&self, id: i64, tracker_list: &str, _old_url: &str, _new_url: &str) -> anyhow::Result<()> {
+        let torrent = self.get_torrent_details(id).await?;
+        let trackers: Vec<Value> = tracker_list
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .enumerate()
+            .map(|(tier, url)| json!({"url": url, "tier": tier}))
+            .collect();
+        self.send_rpc("core.set_torrent_trackers", json!([torrent.hash_string, trackers])).await?;
         Ok(())
     }
 }

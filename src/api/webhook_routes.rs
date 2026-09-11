@@ -695,13 +695,20 @@ pub async fn list_ombi_requests(
     request_body = String,
     responses(
         (status = 200, description = "Webhook ingested successfully"),
-        (status = 400, description = "Invalid payload")
+        (status = 400, description = "Invalid payload"),
+        (status = 401, description = "Invalid or missing webhook secret (only enforced if bazarr.webhook_secret is configured)")
     )
 )]
 pub async fn bazarr_inbound(
     State(state): State<crate::auth::AppState>,
+    headers: HeaderMap,
     body: String,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let config = state.config.get().await;
+    if !crate::api::arr_routes::verify_webhook_secret(&headers, config.bazarr.webhook_secret.as_deref()) {
+        return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Bazarr webhook secret"}))));
+    }
+
     let payload: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Invalid JSON payload: {}", e)}))))?;
 
@@ -715,7 +722,6 @@ pub async fn bazarr_inbound(
     let log_msg = format!("Bazarr {}: Subtitles for '{}' ({}) via {}", event_type, title, language, provider);
     let _ = state.db.log_event("bazarr", "info", &log_msg, None);
 
-    let config = state.config.get().await;
     let notif_title = format!("💬 Conduit Subtitles • {}", title);
     let notif_body = format!("**{}** subtitles acquired via **{}** for `{}`", language, provider, title);
 
@@ -748,13 +754,20 @@ pub async fn bazarr_inbound(
     request_body = String,
     responses(
         (status = 200, description = "Webhook ingested successfully"),
-        (status = 400, description = "Invalid payload")
+        (status = 400, description = "Invalid payload"),
+        (status = 401, description = "Invalid or missing webhook secret (only enforced if overseerr.webhook_secret is configured)")
     )
 )]
 pub async fn overseerr_inbound(
     State(state): State<crate::auth::AppState>,
+    headers: HeaderMap,
     body: String,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let config = state.config.get().await;
+    if !crate::api::arr_routes::verify_webhook_secret(&headers, config.overseerr.webhook_secret.as_deref()) {
+        return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Overseerr webhook secret"}))));
+    }
+
     let payload: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Invalid JSON payload: {}", e)}))))?;
 
@@ -799,7 +812,6 @@ pub async fn overseerr_inbound(
     let log_msg = format!("Overseerr {}: '{}' by {}", event_type, subject, requested_by);
     let _ = state.db.log_event("overseerr", "info", &log_msg, None);
 
-    let config = state.config.get().await;
     let notif_title = format!("🥣 Kibble Bowl • Overseerr Request: {}", subject);
     let notif_body = format!("**{}** requested by **{}**\n\n• **Status:** `{}`\n• **Details:** {}", subject, requested_by, status_str, message);
 
@@ -832,13 +844,20 @@ pub async fn overseerr_inbound(
     request_body = String,
     responses(
         (status = 200, description = "Webhook ingested successfully"),
-        (status = 400, description = "Invalid payload")
+        (status = 400, description = "Invalid payload"),
+        (status = 401, description = "Invalid or missing webhook secret (only enforced if jellyfin.webhook_secret is configured)")
     )
 )]
 pub async fn jellyfin_inbound(
     State(state): State<crate::auth::AppState>,
+    headers: HeaderMap,
     body: String,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let config = state.config.get().await;
+    if !crate::api::arr_routes::verify_webhook_secret(&headers, config.jellyfin.webhook_secret.as_deref()) {
+        return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Jellyfin webhook secret"}))));
+    }
+
     let payload: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Invalid JSON payload: {}", e)}))))?;
 
@@ -850,7 +869,6 @@ pub async fn jellyfin_inbound(
     let log_msg = format!("Jellyfin {}: '{}' by {} on {}", event_type, name, user, server);
     let _ = state.db.log_event("jellyfin", "info", &log_msg, None);
 
-    let config = state.config.get().await;
     if event_type.to_lowercase().contains("playbackstop") || event_type.to_lowercase().contains("scrobble") {
         let notif_title = format!("🍿 Conduit Scrobble • {}", name);
         let notif_body = format!("**{}** finished watching `{}` on **{}**", user, name, server);

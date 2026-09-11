@@ -263,7 +263,7 @@ class ApiClient {
     final response = await http.post(
       Uri.parse('$baseUrl/api/torrents/$compoundId/queue-move'),
       headers: await _getHeaders(),
-      body: jsonEncode({'action': direction}),
+      body: jsonEncode({'direction': direction}),
     ).timeout(_timeout);
     return response.statusCode == 200;
   }

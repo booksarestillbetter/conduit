@@ -603,14 +603,6 @@ export interface AppConfig {
     mattermost?: MattermostChannelConfig;
     discord?: DiscordChannelConfig;
     generic_webhook?: GenericWebhookConfig;
-    batch_min_count: number;
-    notify_on_grab?: boolean;
-    notify_on_download?: boolean;
-    notify_on_error?: boolean;
-    notify_on_autopurge?: boolean;
-    notify_on_replacement?: boolean;
-    notify_on_sync?: boolean;
-    notify_on_scrobble?: boolean;
     /** Independently configured notification destinations — the current model. Each target
      * picks its own channel, which event categories it receives, and an optional zone scope. */
     targets: NotificationTarget[];

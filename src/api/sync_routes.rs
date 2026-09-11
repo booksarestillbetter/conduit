@@ -523,10 +523,12 @@ pub async fn classify_file(
     description = "Invoked by post-download hook script to log file placement, advance Arr status, and dispatch notifications.",
     request_body = NotifyDownloadPayload,
     responses(
-        (status = 200, description = "Download notification acknowledged")
+        (status = 200, description = "Download notification acknowledged"),
+        (status = 401, description = "Unauthorized")
     )
 )]
 pub async fn notify_download(
+    _auth: RequireAuth,
     State(config_mgr): State<ConfigManager>,
     State(db): State<Database>,
     Json(payload): Json<NotifyDownloadPayload>,

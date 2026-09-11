@@ -28,9 +28,10 @@ import {
   Edit3,
   Activity,
   Grid,
+  ArrowRightLeft,
 } from 'lucide-react';
 import { DetailedTorrent, TorrentStatus } from '../types';
-import { fetchTorrentDetails, enrichTorrent, setSequentialDownload, renameTorrentPath } from '../services/api';
+import { fetchTorrentDetails, enrichTorrent, setSequentialDownload, renameTorrentPath, fetchNodes, migrateTorrent } from '../services/api';
 import { BandwidthChart, BandwidthDataPoint } from './BandwidthChart';
 import { parseMediaRelease, getEffectivePoster, getPosterPlaceholder } from '../utils/mediaParser';
 
@@ -138,6 +139,12 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compou
   const [fileFilter, setFileFilter] = useState('');
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [newPathName, setNewPathName] = useState<string>('');
+  const [showMigrate, setShowMigrate] = useState(false);
+  const [nodeOptions, setNodeOptions] = useState<string[]>([]);
+  const [migrateTarget, setMigrateTarget] = useState('');
+  const [migrateDeleteSource, setMigrateDeleteSource] = useState(false);
+  const [migrateDeleteData, setMigrateDeleteData] = useState(false);
+  const [migrating, setMigrating] = useState(false);
 
   useEffect(() => {
     if (!compoundId) return;
@@ -218,6 +225,41 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compou
     }
   };
 
+  const openMigrate = async () => {
+    setShowMigrate(true);
+    setMigrateDeleteSource(false);
+    setMigrateDeleteData(false);
+    try {
+      const nodes = await fetchNodes();
+      const currentNode = compoundId?.split(':')[0];
+      const others = (nodes || []).map((n: any) => n.node).filter((n: string) => n && n !== currentNode);
+      setNodeOptions(others);
+      setMigrateTarget(others[0] || '');
+    } catch {
+      setNodeOptions([]);
+    }
+  };
+
+  const handleMigrate = async () => {
+    if (!compoundId || !torrent?.hash_string || !migrateTarget) return;
+    setMigrating(true);
+    try {
+      await migrateTorrent({
+        source_node: compoundId.split(':')[0],
+        target_node: migrateTarget,
+        hash: torrent.hash_string,
+        delete_source_torrent: migrateDeleteSource,
+        delete_source_data: migrateDeleteSource && migrateDeleteData,
+      });
+      setShowMigrate(false);
+      onClose();
+    } catch (e: any) {
+      alert(`Migration failed: ${e.message}`);
+    } finally {
+      setMigrating(false);
+    }
+  };
+
   const handleCopyHash = () => {
     if (!torrent?.hash_string) return;
     navigator.clipboard.writeText(torrent.hash_string);
@@ -281,6 +323,16 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compou
               >
                 <Sparkles className={`h-3.5 w-3.5 ${enriching ? 'animate-spin' : ''}`} />
                 <span>{enriching ? 'Enriching...' : 'Enrich from Arr'}</span>
+              </button>
+            )}
+            {torrent?.hash_string && (
+              <button
+                onClick={openMigrate}
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/30 text-xs font-semibold transition-colors"
+                title="Move this torrent to another fetcher node"
+              >
+                <ArrowRightLeft className="h-3.5 w-3.5" />
+                <span>Migrate</span>
               </button>
             )}
             <button
@@ -1336,6 +1388,77 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compou
           </button>
         </div>
       </div>
+
+      {showMigrate && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl p-6 space-y-4">
+            <div className="flex items-center space-x-2">
+              <ArrowRightLeft className="h-5 w-5 text-sky-400" />
+              <h3 className="text-sm font-bold text-slate-100">Migrate Torrent</h3>
+            </div>
+            <p className="text-xs text-slate-400">
+              Adds this torrent to the target node (from its magnet link) and optionally removes it from{' '}
+              <strong className="text-slate-300">{compoundId?.split(':')[0]}</strong>. Any existing downloaded data
+              is not copied automatically — the target node will re-fetch or re-verify it.
+            </p>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-300">Target Node</label>
+              {nodeOptions.length === 0 ? (
+                <p className="text-xs text-rose-400">No other nodes available to migrate to.</p>
+              ) : (
+                <select
+                  value={migrateTarget}
+                  onChange={(e) => setMigrateTarget(e.target.value)}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 focus:border-brand-500 focus:outline-none"
+                >
+                  {nodeOptions.map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            <label className="flex items-center space-x-2 text-xs text-slate-300">
+              <input
+                type="checkbox"
+                checked={migrateDeleteSource}
+                onChange={(e) => setMigrateDeleteSource(e.target.checked)}
+                className="rounded border-slate-600 bg-slate-800 text-brand-500 focus:ring-brand-500"
+              />
+              <span>Remove torrent from source node after migration</span>
+            </label>
+            {migrateDeleteSource && (
+              <label className="flex items-center space-x-2 text-xs text-rose-300 pl-6">
+                <input
+                  type="checkbox"
+                  checked={migrateDeleteData}
+                  onChange={(e) => setMigrateDeleteData(e.target.checked)}
+                  className="rounded border-slate-600 bg-slate-800 text-rose-500 focus:ring-rose-500"
+                />
+                <span>Also delete the source node's downloaded data from disk</span>
+              </label>
+            )}
+
+            <div className="flex items-center justify-end space-x-2 pt-2">
+              <button
+                onClick={() => setShowMigrate(false)}
+                disabled={migrating}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 text-xs text-slate-300 hover:text-white disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleMigrate}
+                disabled={migrating || !migrateTarget}
+                className="px-3 py-1.5 rounded-lg bg-sky-600 text-xs font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
+              >
+                {migrating ? 'Migrating...' : 'Migrate'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

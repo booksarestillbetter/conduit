@@ -34,6 +34,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub ombi: OmbiConfig,
     #[serde(default)]
+    pub bazarr: BazarrConfig,
+    #[serde(default)]
+    pub overseerr: OverseerrConfig,
+    #[serde(default)]
+    pub jellyfin: JellyfinConfig,
+    #[serde(default)]
     pub tracker_circuit_breaker: TrackerCircuitBreakerConfig,
     /// Independent stacks ("zones") — e.g. a general library and a separate 4K library, each
     /// with its own Sonarr/Radarr/Lidarr/Plex and a subset of fetcher nodes. Additive and
@@ -83,6 +89,10 @@ pub struct SystemConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_jwt_secret")]
     pub jwt_secret: String,
+    /// Reserved for the multi-user / RBAC milestone (see `TODO.md`) — not yet consulted
+    /// anywhere. There is currently no registration endpoint at all for it to gate; the
+    /// only way to create a user today is `POST /api/auth/setup`, which is itself only
+    /// reachable once, before the first admin account exists.
     #[serde(default = "default_true")]
     pub enable_registration: bool,
     #[serde(default = "default_log_level")]
@@ -309,6 +319,24 @@ pub struct OmbiConfig {
     pub webhook_secret: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct BazarrConfig {
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct OverseerrConfig {
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct JellyfinConfig {
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TraktConfig {
     #[serde(default)]
@@ -351,7 +379,7 @@ impl Default for TraktConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct NotificationConfig {
     /// Deprecated — kept only so `ConfigManager::load_or_init`'s one-time migration can read a
     /// pre-0.11 config and synthesize an equivalent `NotificationTarget`. Never read by dispatch
@@ -362,23 +390,6 @@ pub struct NotificationConfig {
     pub discord: Option<DiscordConfig>,
     #[serde(default)]
     pub generic_webhook: Option<GenericWebhookConfig>,
-    #[serde(default = "default_true")]
-    pub notify_on_grab: bool,
-    #[serde(default = "default_true")]
-    pub notify_on_download: bool,
-    #[serde(default = "default_true")]
-    pub notify_on_error: bool,
-    #[serde(default = "default_true")]
-    pub notify_on_autopurge: bool,
-    #[serde(default = "default_true")]
-    pub notify_on_replacement: bool,
-    #[serde(default = "default_true")]
-    pub notify_on_sync: bool,
-    #[serde(default = "default_false")]
-    pub notify_on_scrobble: bool,
-
-    #[serde(default = "default_notify_min_count")]
-    pub batch_min_count: u32,
 
     /// Independently configured notification destinations — the current model. Each target
     /// picks its own channel, which event categories it receives, and an optional zone scope.
@@ -386,27 +397,6 @@ pub struct NotificationConfig {
     /// first load of a pre-0.11 config.
     #[serde(default)]
     pub targets: Vec<NotificationTarget>,
-}
-
-fn default_notify_min_count() -> u32 { 1 }
-
-impl Default for NotificationConfig {
-    fn default() -> Self {
-        Self {
-            mattermost: None,
-            discord: None,
-            generic_webhook: None,
-            batch_min_count: 1,
-            notify_on_grab: true,
-            notify_on_download: true,
-            notify_on_error: true,
-            notify_on_autopurge: true,
-            notify_on_replacement: true,
-            notify_on_sync: true,
-            notify_on_scrobble: false,
-            targets: Vec::new(),
-        }
-    }
 }
 
 /// One notification destination: a channel, which event categories it receives (empty = every

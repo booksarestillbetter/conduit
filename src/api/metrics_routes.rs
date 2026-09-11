@@ -333,10 +333,11 @@ pub struct CrashLogResponse {
     summary = "Retrieve fatal crash and panic diagnostics log",
     description = "Returns captured panic stack traces and timestamps to aid post-mortem crash diagnostics.",
     responses(
-        (status = 200, description = "Crash log output", body = CrashLogResponse)
+        (status = 200, description = "Crash log output", body = CrashLogResponse),
+        (status = 401, description = "Unauthorized")
     )
 )]
-pub async fn get_crash_log(State(state): State<AppState>) -> Result<Json<CrashLogResponse>, StatusCode> {
+pub async fn get_crash_log(_auth: RequireAuth, State(state): State<AppState>) -> Result<Json<CrashLogResponse>, StatusCode> {
     let cfg = state.config.get().await;
     let crash_file = std::path::Path::new(&cfg.system.data_dir).join("crash.log");
     let crash_file_path = crash_file.to_string_lossy().to_string();
