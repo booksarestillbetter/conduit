@@ -383,12 +383,47 @@ export async function updateNodeSession(nodeName: string, settings: any): Promis
   if (!res.ok) throw new Error('Failed to update node daemon session');
 }
 
+/** What a node's daemon can do; mirrors `NodeCapabilities` in fetcher-core. */
+export interface NodeCapabilities {
+  native_tracker_circuit_breaker: boolean;
+  queue_move: boolean;
+  sequential_download: boolean;
+  reannounce: boolean;
+  replace_trackers: boolean;
+  blocklist_update: boolean;
+  rename_path: boolean;
+  test_port: boolean;
+  turtle_mode: boolean;
+}
+
+export async function fetchNodeCapabilities(): Promise<Record<string, NodeCapabilities>> {
+  const res = await apiFetch(`${API_BASE}/api/nodes/capabilities`, { headers: getAuthHeaders() });
+  if (!res.ok) throw new Error('Failed to fetch node capabilities');
+  return res.json();
+}
+
+/** The daemon behind a node cannot do what was asked (HTTP 501); the message says why. */
+export class UnsupportedError extends Error {}
+
+/** Throws for a failed response: an `UnsupportedError` for 501, otherwise an `Error` carrying
+ *  the server's own message when it sent one, else `fallback`. */
+async function failWith(res: Response, fallback: string): Promise<never> {
+  let message = fallback;
+  try {
+    const body = await res.clone().json();
+    if (body && typeof body.error === 'string' && body.error) message = body.error;
+  } catch {
+    // Not JSON: keep the fallback.
+  }
+  throw res.status === 501 ? new UnsupportedError(message) : new Error(message);
+}
+
 export async function testNodePort(nodeName: string): Promise<boolean> {
   const res = await apiFetch(`${API_BASE}/api/nodes/${encodeURIComponent(nodeName)}/test-port`, {
     method: 'POST',
     headers: getAuthHeaders(),
   });
-  if (!res.ok) throw new Error('Port test failed');
+  if (!res.ok) return failWith(res, 'Port test failed');
   const data = await res.json();
   return data.port_is_open;
 }
@@ -844,7 +879,7 @@ export async function moveTorrentQueue(compoundId: string, direction: 'top' | 'u
     headers: getAuthHeaders(),
     body: JSON.stringify({ direction }),
   });
-  if (!res.ok) throw new Error(`Failed to move torrent queue (${direction})`);
+  if (!res.ok) return failWith(res, `Failed to move torrent queue (${direction})`);
   return res.json();
 }
 
@@ -854,7 +889,7 @@ export async function moveBulkQueue(compoundIds: string[], direction: 'top' | 'u
     headers: getAuthHeaders(),
     body: JSON.stringify({ compound_ids: compoundIds, direction }),
   });
-  if (!res.ok) throw new Error(`Failed to execute bulk queue move (${direction})`);
+  if (!res.ok) return failWith(res, `Failed to execute bulk queue move (${direction})`);
   return res.json();
 }
 
@@ -864,7 +899,7 @@ export async function setSequentialDownload(compoundId: string, enabled: boolean
     headers: getAuthHeaders(),
     body: JSON.stringify({ enabled }),
   });
-  if (!res.ok) throw new Error('Failed to update sequential download');
+  if (!res.ok) return failWith(res, 'Failed to update sequential download');
   return res.json();
 }
 
@@ -874,7 +909,7 @@ export async function renameTorrentPath(compoundId: string, path: string, newNam
     headers: getAuthHeaders(),
     body: JSON.stringify({ path, new_name: newName }),
   });
-  if (!res.ok) throw new Error('Failed to rename torrent path');
+  if (!res.ok) return failWith(res, 'Failed to rename torrent path');
   return res.json();
 }
 
@@ -884,7 +919,7 @@ export async function batchReplaceTrackers(payload: { node?: string; compound_id
     headers: getAuthHeaders(),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error('Failed to replace trackers');
+  if (!res.ok) return failWith(res, 'Failed to replace trackers');
   return res.json();
 }
 
@@ -894,7 +929,7 @@ export async function toggleTurtleMode(nodeName: string, enabled: boolean): Prom
     headers: getAuthHeaders(),
     body: JSON.stringify({ enabled }),
   });
-  if (!res.ok) throw new Error('Failed to toggle turtle mode');
+  if (!res.ok) return failWith(res, 'Failed to toggle turtle mode');
   return res.json();
 }
 
@@ -913,7 +948,7 @@ export async function updateNodeBlocklist(nodeName: string): Promise<{ blocklist
     method: 'POST',
     headers: getAuthHeaders(),
   });
-  if (!res.ok) throw new Error('Failed to update node blocklist');
+  if (!res.ok) return failWith(res, 'Failed to update node blocklist');
   return res.json();
 }
 

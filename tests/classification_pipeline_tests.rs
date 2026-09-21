@@ -138,6 +138,7 @@ async fn test_four_tier_classification_pipeline() {
     let req = Request::builder()
         .method("POST")
         .uri("/api/sync/classify")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .header("Content-Type", "application/json")
         .body(Body::from(serde_json::to_vec(&serde_json::json!({
             "name": "Severance.S02E01.1080p.WEB-DL",
@@ -157,6 +158,7 @@ async fn test_four_tier_classification_pipeline() {
     let req2 = Request::builder()
         .method("POST")
         .uri("/api/sync/classify")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .header("Content-Type", "application/json")
         .body(Body::from(serde_json::to_vec(&serde_json::json!({
             "name": "Frieren.Beyond.Journeys.End.BD",
@@ -176,6 +178,7 @@ async fn test_four_tier_classification_pipeline() {
     let req3 = Request::builder()
         .method("POST")
         .uri("/api/sync/classify")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .header("Content-Type", "application/json")
         .body(Body::from(serde_json::to_vec(&serde_json::json!({
             "name": "Artist.Name.-.Album.(2024).[FLAC]",
@@ -193,6 +196,7 @@ async fn test_four_tier_classification_pipeline() {
     let req4 = Request::builder()
         .method("POST")
         .uri("/api/sync/classify")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .header("Content-Type", "application/json")
         .body(Body::from(serde_json::to_vec(&serde_json::json!({
             "name": "Succession.S04E01.2160p.UHD.mkv",
@@ -214,6 +218,7 @@ async fn test_four_tier_classification_pipeline() {
     let req5 = Request::builder()
         .method("POST")
         .uri("/api/sync/classify")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .header("Content-Type", "application/json")
         .body(Body::from(serde_json::to_vec(&serde_json::json!({
             "name": "Lanterns.S01E02.Trust.Fall.1080p.AMZN.WEB-DL.DDP5.1.H.264-NTb.mkv",
@@ -235,6 +240,7 @@ async fn test_four_tier_classification_pipeline() {
     let req6 = Request::builder()
         .method("POST")
         .uri("/api/sync/classify")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .header("Content-Type", "application/json")
         .body(Body::from(serde_json::to_vec(&serde_json::json!({
             "name": "Hadestown.The.Musical.2026.REPACK.1080p.AMZN.WEB-DL.DDP5.1.H.264-SCOPE.mkv",
@@ -255,6 +261,7 @@ async fn test_four_tier_classification_pipeline() {
     let req7 = Request::builder()
         .method("POST")
         .uri("/api/sync/classify")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .header("Content-Type", "application/json")
         .body(Body::from(r#"{
             "name": "The.Last.Sunrise.2026.1080p.AMZN.WEB-DL.DDP5.1.H.264-FLUX.mkv",

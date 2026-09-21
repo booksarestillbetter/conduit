@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+---
+
+## [0.16.2] - 2026-09-21
+
+### Fixed
+
+- **The version in the web UI was stale (it said 0.13.2).** It came from `web/package.json`, which nobody bumped. The header and Settings page now show the version the server reports (`/api/health`), so it always matches what is running; `package.json` (now 0.16.2) is only the fallback until the server answers.
+- **The server could hang completely under load (introduced in 0.16.1).** Looking up a node's capabilities took the client-list lock while the system health overview held the cache lock, and the poller's node sync takes those two in the opposite order, so the two could wait on each other forever and every request touching the pool stalled (the web UI and nginx then just hung). The backend kind is now kept in its own lock that is never held while taking another, and a test runs both paths concurrently to catch a recurrence. If you deployed 0.16.1, upgrade.
+
+---
+
+## [0.16.1] - 2026-09-21
+
+### Security
+
+- **Breaking: endpoints that were readable without credentials now require them.** A sweep test over every route found these open: `GET /metrics`, `GET /api/system/stats`, `/api/system/health`, `/api/system/engines`, `GET /api/plex/scrobbles`, `GET /api/ombi/requests`, `GET /api/sync/hook-script` and `POST /api/sync/classify`. All now take the usual credentials (JWT, API token, Basic or `X-Api-Key`). Scripts that fetch the hook script with a bare `curl` must add `-H "Authorization: Bearer $TOKEN"` (the README and the Settings page's copy button already show it). Prometheus scrapers need a bearer token too, or set `system.metrics_public = true` to keep the old open behavior on a trusted network.
+- A permanent test (`every_route_requires_credentials_unless_it_is_public_on_purpose`) now fails if a new route is added without auth and is not on the short public list (login, setup, health, WebSocket, mobile pairing, inbound webhooks with their own secrets).
+
+### Added
+
+- **Synapse can reorder its queue, download sequentially, re-announce, replace trackers and reload its blocklist.** These were "not supported" errors (and re-announce a silent no-op that reported success). The vendored `synapse.proto` is synced with the new RPCs, and the Synapse adapter uses them; a Synapse node shows its queue position. Rename stays unsupported.
+- **Backends say what they cannot do.** `GET /api/nodes/capabilities` lists, per node, queue reordering, sequential download, re-announce, tracker replacement, blocklist update, rename, port test and alternate speed limits. The web UI disables the controls a node's daemon cannot perform (sequential toggle, rename, port test, blocklist update). Calling one anyway now returns `501` with the reason instead of a bare `500`; bulk actions report such nodes as `unsupported`, and bulk queue-move and tracker replacement list `unsupported_nodes` (and `failed_nodes`) rather than reporting success.
+- **Trakt tokens are refreshed automatically.** With a client secret and refresh token, the watch-sync engine renews the access token when it is within an hour of expiring (or has no recorded expiry yet), and saves the new pair (Trakt refresh tokens are single-use). A settings page opened before a refresh can no longer overwrite the new tokens with old ones. The Settings page has a Refresh Token field.
+- **A slow Transmission daemon is no longer reported as down.** Whole-library `torrent-get` calls get 90 s instead of 15 s; after the first full read, polls ask only for `recently-active` torrents and merge them locally (full refresh every 5 minutes or after any gap), so a big library costs a few rows per poll. A node keeps serving its last good snapshot until three polls in a row fail, and health alerts now carry the real error (timeout, refused, HTTP status) instead of a generic message.
+- **Synapse live alerts (`crates/fetcher-synapse`, `src/engines/node_alerts.rs`)**: a Synapse node's `SubscribeAlerts` stream (torrent finished, peer banned, tracker announced, ...) is forwarded onto a new `node_alerts` WebSocket topic as `{node, event_type, info_hash, timestamp_ms, data}`. It only adds immediacy on top of polling: nothing depends on it, the stream is opened only while something is subscribed, it reconnects with backoff, and a daemon without the RPC is left alone.
+- **Synapse session settings in the Daemon Settings page (`web/src/pages/DaemonSettings.tsx`)**: the page no longer says settings are unavailable for Synapse nodes. It now reads and writes bandwidth and alternate speed limits, peer limits and the default download directory, plus a "Peer Discovery & Transport" card with only the switches the selected node has: DHT, PEX, local peer discovery and uTP, and for Synapse DHT read-only (BEP 43), Zeroconf (BEP 26) and the announce address for trackers.
+
+### Fixed
+
+- **Port tests no longer lie.** "Test port" returned "open" for Synapse, qBittorrent and Deluge without testing anything; it is now reported as unsupported for them (Transmission still tests for real).
+
+### Changed
+
+- The vendored `synapse.proto` is synced with Synapse (swarm discovery counters, `enable_utp`, `SubscribeAlerts`, and the `dht_read_only`, `zeroconf_enabled` and `announce_ip` session settings).
+- A Synapse node's session no longer reports Conduit's own gRPC port as its peer port (the daemon does not expose one), so the peer-port field is hidden for it instead of showing a wrong number.
+- `TorrentClientTrait::subscribe_alerts` (default: none) lets a backend offer a live event feed; `fetcher_core::NodeAlert` is the event type.
+
+---
+
 ## [0.16.0] - 2026-09-10
 
 ### Security

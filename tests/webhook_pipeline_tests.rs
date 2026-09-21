@@ -25,6 +25,7 @@ async fn test_plex_webhook_json_and_scrobble_listing() {
     let fetcher_pool = Arc::new(FetcherPool::new());
     let notifiers = Arc::new(NotificationManager);
 
+    let jwt_secret = config_mgr.get().await.system.jwt_secret.clone();
     let state = AppState {
         config: config_mgr,
         db: db.clone(),
@@ -40,6 +41,8 @@ async fn test_plex_webhook_json_and_scrobble_listing() {
     };
 
     let router = build_api_router(state);
+    let admin = db.create_user("admin", &conduit::auth::hash_password("AdminPass123").unwrap(), true).unwrap();
+    let admin_token = conduit::auth::create_jwt(&admin.id, &admin.username, true, admin.token_version, &jwt_secret, 7).unwrap();
 
     // 1. Ingest Plex JSON webhook
     let plex_payload = serde_json::json!({
@@ -77,6 +80,7 @@ async fn test_plex_webhook_json_and_scrobble_listing() {
     let req = Request::builder()
         .method("GET")
         .uri("/api/plex/scrobbles?event=media.scrobble")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .body(Body::empty())
         .unwrap();
 
@@ -132,6 +136,7 @@ async fn test_ombi_webhook_and_request_listing() {
     let fetcher_pool = Arc::new(FetcherPool::new());
     let notifiers = Arc::new(NotificationManager);
 
+    let jwt_secret = config_mgr.get().await.system.jwt_secret.clone();
     let state = AppState {
         config: config_mgr,
         db: db.clone(),
@@ -147,6 +152,8 @@ async fn test_ombi_webhook_and_request_listing() {
     };
 
     let router = build_api_router(state);
+    let admin = db.create_user("admin", &conduit::auth::hash_password("AdminPass123").unwrap(), true).unwrap();
+    let admin_token = conduit::auth::create_jwt(&admin.id, &admin.username, true, admin.token_version, &jwt_secret, 7).unwrap();
 
     // 1. Ingest Ombi request webhook
     let ombi_payload = serde_json::json!({
@@ -175,6 +182,7 @@ async fn test_ombi_webhook_and_request_listing() {
     let req = Request::builder()
         .method("GET")
         .uri("/api/ombi/requests")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .body(Body::empty())
         .unwrap();
 

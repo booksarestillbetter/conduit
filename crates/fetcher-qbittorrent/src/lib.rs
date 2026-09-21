@@ -568,7 +568,7 @@ impl TorrentClientTrait for QBittorrentClient {
     }
 
     async fn update_blocklist(&self) -> anyhow::Result<i64> {
-        anyhow::bail!("qBittorrent has no built-in blocklist RPC")
+        Err(fetcher_core::unsupported("qBittorrent has no built-in blocklist to update"))
     }
 
     async fn get_free_space(&self, _path: &str) -> anyhow::Result<i64> {
@@ -598,7 +598,7 @@ impl TorrentClientTrait for QBittorrentClient {
     }
 
     async fn test_port(&self) -> anyhow::Result<bool> {
-        Ok(true)
+        Err(fetcher_core::unsupported("qBittorrent has no port-check API"))
     }
 
     async fn replace_trackers(&self, id: i64, _tracker_list: &str, old_url: &str, new_url: &str) -> anyhow::Result<()> {

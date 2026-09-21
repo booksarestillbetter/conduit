@@ -6,6 +6,7 @@ pub mod file_sync;
 pub mod health_monitor;
 pub mod influx_pusher;
 pub mod ip_asn_updater;
+pub mod node_alerts;
 pub mod pipeline;
 pub mod poller;
 pub mod registry;
@@ -139,6 +140,15 @@ pub fn start_all_engines(
         let (pool, db, event_bus, registry) = (pool.clone(), db.clone(), event_bus.clone(), registry.clone());
         spawn_supervised("telemetry_publisher", registry.clone(), move || {
             telemetry::run_telemetry_publisher(pool.clone(), db.clone(), event_bus.clone(), TaskHandle::new(registry.clone(), "telemetry_publisher"))
+        });
+    }
+
+    // 14. Node Alert Forwarder (live events pushed by nodes that have an alert stream, on the
+    // node_alerts topic — see engines::node_alerts)
+    {
+        let (pool, event_bus, registry) = (pool.clone(), event_bus.clone(), registry.clone());
+        spawn_supervised("node_alerts", registry.clone(), move || {
+            node_alerts::run_node_alerts_loop(pool.clone(), event_bus.clone(), TaskHandle::new(registry.clone(), "node_alerts"))
         });
     }
 }

@@ -591,6 +591,9 @@ export interface AppConfig {
     client_id: string;
     client_secret: string;
     access_token?: string;
+    refresh_token?: string;
+    /** Unix seconds; set by Conduit when it refreshes the token. */
+    token_expiry?: number;
     sync_interval_mins: number;
     /** Separate, off-by-default opt-in for Conduit writing a "watched" status back onto a live
      * Plex server (vs. just pushing local scrobbles to Trakt, which only needs a participating

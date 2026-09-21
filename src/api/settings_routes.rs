@@ -41,8 +41,10 @@ pub async fn get_settings(
 pub async fn update_settings(
     _admin: RequireAdmin,
     State(config_mgr): State<ConfigManager>,
-    Json(new_config): Json<AppConfig>,
+    Json(mut new_config): Json<AppConfig>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // A settings page opened before a Trakt token refresh must not put the old tokens back.
+    crate::trakt_client::keep_newer_tokens(&config_mgr.get().await.trakt, &mut new_config.trakt);
     config_mgr.update(new_config).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
 

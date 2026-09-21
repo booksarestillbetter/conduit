@@ -277,6 +277,7 @@ fn extract_tracker_host(raw: &str) -> String {
     )
 )]
 pub async fn classify_file(
+    _auth: crate::auth::RequireAuth,
     State(config_mgr): State<ConfigManager>,
     State(db): State<Database>,
     Json(payload): Json<ClassifyFilePayload>,
@@ -778,6 +779,7 @@ pub struct HookScriptQueryParams {
     )
 )]
 pub async fn get_hook_script(
+    _auth: crate::auth::RequireAuth,
     Query(params): Query<HookScriptQueryParams>,
     State(config_mgr): State<ConfigManager>,
 ) -> axum::response::Response {

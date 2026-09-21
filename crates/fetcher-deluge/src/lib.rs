@@ -464,11 +464,15 @@ impl TorrentClientTrait for DelugeClient {
     /// exist anywhere in Conduit today; returning a clear error here is honest about that
     /// gap instead of silently doing nothing while a UI toggle claims success.
     async fn set_turtle_mode(&self, _enabled: bool) -> anyhow::Result<()> {
-        anyhow::bail!("Deluge has no native turtle-mode / alternate-speed toggle; use per-node bandwidth limits instead")
+        Err(fetcher_core::unsupported(
+            "Deluge has no alternate-speed toggle; use per-node bandwidth limits instead",
+        ))
     }
 
     async fn update_blocklist(&self) -> anyhow::Result<i64> {
-        anyhow::bail!("Deluge has no built-in blocklist RPC; use the Blocklist plugin's own settings instead")
+        Err(fetcher_core::unsupported(
+            "Deluge has no built-in blocklist to update; use the Blocklist plugin's own settings",
+        ))
     }
 
     async fn get_free_space(&self, path: &str) -> anyhow::Result<i64> {
@@ -490,7 +494,7 @@ impl TorrentClientTrait for DelugeClient {
     }
 
     async fn test_port(&self) -> anyhow::Result<bool> {
-        Ok(true)
+        Err(fetcher_core::unsupported("Deluge has no port-check API"))
     }
 
     /// `tracker_list` is the caller's already-computed, post-replacement announce list --

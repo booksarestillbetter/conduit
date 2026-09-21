@@ -12,6 +12,7 @@ service SynapseControl {
 
   // --- Tier 2: Deep Per-Torrent Inspection (Opt-In) ---
   rpc SubscribeTorrentDetail(TorrentDetailRequest) returns (stream TorrentDetailEvent);
+  rpc SubscribeAlerts(SubscribeAlertsRequest) returns (stream AlertEvent);
 
   // --- Unary Swarm Commands ---
   rpc AddTorrent(AddTorrentRequest) returns (AddTorrentResponse);
@@ -30,6 +31,13 @@ service SynapseControl {
   rpc GetCapabilities(Empty) returns (CapabilitiesResponse);
   rpc ListCircuitBreakers(Empty) returns (CircuitBreakerListResponse);
   rpc ForceCircuitBreakerAction(CircuitBreakerActionRequest) returns (CommandResponse);
+
+  // Queue, picking, trackers, blocklist
+  rpc MoveInQueue(MoveInQueueRequest) returns (CommandResponse);
+  rpc SetSequentialDownload(SequentialDownloadRequest) returns (CommandResponse);
+  rpc ReannounceTorrents(TorrentHashesRequest) returns (CommandResponse);
+  rpc ReplaceTrackers(ReplaceTrackersRequest) returns (CommandResponse);
+  rpc ReloadIpFilter(Empty) returns (ReloadIpFilterResponse);
 }
 
 message Empty {}
@@ -68,6 +76,37 @@ message CircuitBreakerActionRequest {
   Action action = 2;
 }
 
+message TorrentHashesRequest {
+  repeated string hashes = 1;
+}
+
+message MoveInQueueRequest {
+  enum Direction {
+    TOP = 0;
+    UP = 1;
+    DOWN = 2;
+    BOTTOM = 3;
+  }
+  repeated string hashes = 1;
+  Direction direction = 2;
+}
+
+message SequentialDownloadRequest {
+  repeated string hashes = 1;
+  bool enabled = 2;
+}
+
+// Replaces the trackers a torrent announces to. An empty list restores the trackers from the
+// torrent's own metainfo.
+message ReplaceTrackersRequest {
+  string hash = 1;
+  repeated string trackers = 2;
+}
+
+message ReloadIpFilterResponse {
+  uint32 rules = 1; // rules active after the reload
+}
+
 enum TorrentState {
   STATE_STOPPED = 0;
   STATE_CHECKING = 1;
@@ -94,6 +133,7 @@ message SessionStatsUpdate {
   uint32 active_seeding = 7;
   uint64 free_disk_space_bytes = 8;
   int64 timestamp_ms = 9;
+  uint32 dht_nodes = 10;
 }
 
 message TorrentSummary {
@@ -113,6 +153,7 @@ message TorrentSummary {
   int64 added_at = 14;
   uint32 piece_count = 15;
   uint32 piece_size = 16;
+  uint32 queue_position = 17; // 0 is next in line to start
 }
 
 message TorrentDelta {
@@ -126,6 +167,7 @@ message TorrentDelta {
   optional uint64 eta_seconds = 8;
   optional float ratio = 9;
   optional string error_message = 10;
+  optional uint32 queue_position = 11;
 }
 
 message TorrentSnapshotChunk {
@@ -195,6 +237,18 @@ message TorrentDetailEvent {
   uint32 piece_count = 7;
   uint32 piece_size = 8;
   repeated uint32 availability = 9;
+  uint32 candidate_peers = 10;
+  uint32 active_dials = 11;
+  bool is_private = 12;
+  bool allows_dht = 13;
+  bool allows_pex = 14;
+  bool allows_lsd = 15;
+  uint32 pex_peers = 16;
+  uint64 discovered_from_tracker = 17;
+  uint64 discovered_from_dht = 18;
+  uint64 discovered_from_pex = 19;
+  uint64 discovered_from_lsd = 20;
+  repeated string webseeds = 21;
 }
 
 message AddTorrentRequest {
@@ -290,6 +344,11 @@ message SessionSettingsResponse {
   bool start_added_torrents = 32;
   bool trash_original_torrent_files = 33;
   bool is_alt_speed_active = 34;
+  bool enable_utp = 35;
+  bool dht_read_only = 36;
+  bool zeroconf_enabled = 37;
+  // Address announced to trackers; empty when unset.
+  string announce_ip = 38;
 }
 
 message UpdateSessionSettingsRequest {
@@ -334,6 +393,11 @@ message UpdateSessionSettingsRequest {
   optional uint32 peer_port = 34;
   optional string rpc_listen_addr = 35;
   optional string http_listen_addr = 36;
+  optional bool enable_utp = 37;
+  optional bool dht_read_only = 38;
+  optional bool zeroconf_enabled = 39;
+  // An address to announce to trackers; an empty string clears it.
+  optional string announce_ip = 40;
 }
 
 message UpdateSessionSettingsResponse {
@@ -342,3 +406,13 @@ message UpdateSessionSettingsResponse {
   optional string error = 3;
 }
 
+message SubscribeAlertsRequest {
+  optional string info_hash = 1;
+}
+
+message AlertEvent {
+  string event_type = 1;
+  string payload_json = 2;
+  int64 timestamp_ms = 3;
+  optional string info_hash = 4;
+}

@@ -468,7 +468,7 @@ checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "conduit"
-version = "0.16.0"
+version = "0.16.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -749,6 +749,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "tracing",
  "utoipa",
 ]
@@ -815,6 +816,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

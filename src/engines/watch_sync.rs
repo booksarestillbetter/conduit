@@ -21,7 +21,13 @@ pub async fn run_watch_sync_loop(config_mgr: ConfigManager, db: Database, handle
     loop {
         let config = config_mgr.get().await;
         if config.trakt.enabled && !config.trakt.client_id.is_empty() {
-            if let Some(access_token) = config.trakt.access_token.clone().filter(|t| !t.is_empty()) {
+            // Renews the token first when it is about to expire (and saves the new pair), then
+            // syncs with whichever token is current.
+            let access = trakt_client::current_access_token(&config_mgr, trakt_client::API_BASE, Utc::now().timestamp()).await;
+            if let Some(access_token) = access {
+                // Re-read: a refresh above rewrote the token fields, and the steps below save
+                // a copy of the config, which must not carry the old tokens back.
+                let config = config_mgr.get().await;
                 ensure_server_uuids(&config_mgr, &config).await;
                 push_scrobbles_to_trakt(&config, &db, &access_token).await;
                 if config.trakt.sync_watched_back_to_plex {

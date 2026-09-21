@@ -32,6 +32,7 @@ import {
 } from 'lucide-react';
 import { DetailedTorrent, TorrentStatus } from '../types';
 import { fetchTorrentDetails, enrichTorrent, setSequentialDownload, renameTorrentPath, fetchNodes, migrateTorrent } from '../services/api';
+import { useNodeCapabilities } from '../hooks/useNodeCapabilities';
 import { BandwidthChart, BandwidthDataPoint } from './BandwidthChart';
 import { parseMediaRelease, getEffectivePoster, getPosterPlaceholder } from '../utils/mediaParser';
 
@@ -128,6 +129,8 @@ function getStatusBadge(status: TorrentStatus, error: number, isCircuitBroken?: 
 }
 
 export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compoundId, onClose }) => {
+  const { can } = useNodeCapabilities();
+  const torrentNode = compoundId?.split(':')[0];
   const [torrent, setTorrent] = useState<DetailedTorrent | null>(null);
   const [speedHistory, setSpeedHistory] = useState<BandwidthDataPoint[]>([]);
   const [loading, setLoading] = useState(true);
@@ -869,12 +872,17 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compou
                               alert(`Failed to toggle sequential download: ${err.message}`);
                             }
                           }}
-                          className={`px-2 py-0.5 rounded text-[11px] font-bold border transition-colors cursor-pointer flex items-center space-x-1 ${
+                          disabled={!can(torrentNode, 'sequential_download')}
+                          className={`px-2 py-0.5 rounded text-[11px] font-bold border transition-colors flex items-center space-x-1 disabled:opacity-40 disabled:cursor-not-allowed ${
                             torrent.sequential_download
                               ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
                               : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
                           }`}
-                          title="Click to toggle Sequential Piece Download Mode"
+                          title={
+                            can(torrentNode, 'sequential_download')
+                              ? 'Click to toggle Sequential Piece Download Mode'
+                              : "This node's daemon has no sequential download"
+                          }
                         >
                           <span>🎬 Sequential:</span>
                           <span>{torrent.sequential_download ? 'ON' : 'OFF'}</span>
@@ -1051,16 +1059,18 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compou
                                 ) : (
                                   <div className="flex items-center space-x-2 truncate">
                                     <span className="font-mono text-slate-200 truncate" title={f.name}>{f.name}</span>
-                                    <button
-                                      onClick={() => {
-                                        setRenamingPath(f.name);
-                                        setNewPathName(f.name.split('/').pop() || f.name);
-                                      }}
-                                      className="text-slate-500 hover:text-brand-400 transition-colors p-1"
-                                      title="Rename file / path"
-                                    >
-                                      <Edit3 className="h-3 w-3" />
-                                    </button>
+                                    {can(torrentNode, 'rename_path') && (
+                                      <button
+                                        onClick={() => {
+                                          setRenamingPath(f.name);
+                                          setNewPathName(f.name.split('/').pop() || f.name);
+                                        }}
+                                        className="text-slate-500 hover:text-brand-400 transition-colors p-1"
+                                        title="Rename file / path"
+                                      >
+                                        <Edit3 className="h-3 w-3" />
+                                      </button>
+                                    )}
                                   </div>
                                 )}
                               </div>

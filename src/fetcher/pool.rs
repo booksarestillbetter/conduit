@@ -16,6 +16,9 @@ use tracing::{debug, warn};
 /// How long a detected `NodeCapabilities` snapshot stays valid before re-probing — long
 /// enough to avoid an extra RPC on every poll tick, short enough that an in-place daemon
 /// upgrade/downgrade is picked up without restarting Conduit.
+/// How many polls in a row must fail before a node that has answered before is shown as
+/// disconnected. With the pool's 2s/4s/8s backoff this is roughly 15 seconds of silence.
+const DISCONNECT_AFTER_ERRORS: u32 = 3;
 const CAPABILITIES_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
@@ -27,6 +30,9 @@ pub struct CachedNodeData {
     pub free_space_bytes: i64,
     pub torrents: Vec<UnifiedTorrent>,
     pub stats: NodeStats,
+    /// Most recent poll failure (cleared on success), so health reporting can say *why* a
+    /// node is down instead of a generic "unreachable".
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +58,11 @@ pub struct FetcherPool {
     /// Refreshed on every successful poll of that node (not TTL-throttled like
     /// `capabilities` — this is the actual live status data the UI displays).
     native_breakers: RwLock<HashMap<String, Vec<NativeCircuitBreakerStatus>>>,
+    /// Each node's backend kind, kept apart from `clients` on purpose. Capability lookups run
+    /// while the cache is read-locked, and the node syncer holds `clients` while waiting for the
+    /// cache write lock; looking the kind up through `clients` there deadlocks the two. This is a
+    /// leaf lock: nothing else is ever acquired while holding it.
+    node_kinds: RwLock<HashMap<String, RetrieverClientType>>,
 }
 
 impl Default for FetcherPool {
@@ -71,12 +82,14 @@ impl FetcherPool {
             bandwidth_history: RwLock::new(VecDeque::with_capacity(300)),
             capabilities: RwLock::new(HashMap::new()),
             native_breakers: RwLock::new(HashMap::new()),
+            node_kinds: RwLock::new(HashMap::new()),
         }
     }
 
     pub fn sync_nodes_from_config(&self, config: &AppConfig) {
         let mut clients_write = self.clients.write();
         let mut cache_write = self.cache.write();
+        let mut kinds_write = self.node_kinds.write();
 
         // Remove disabled or deleted nodes
         clients_write.retain(|name, _| {
@@ -85,6 +98,7 @@ impl FetcherPool {
         cache_write.retain(|name, _| {
             config.nodes.get(name).map(|n| n.enabled).unwrap_or(false)
         });
+        kinds_write.retain(|name, _| clients_write.contains_key(name));
 
         // Add or update nodes only when config actually changed or client missing
         for (name, node_cfg) in &config.nodes {
@@ -97,6 +111,7 @@ impl FetcherPool {
                 if needs_new_client {
                     clients_write.insert(name.clone(), crate::downloader::create_client(node_cfg.clone()));
                 }
+                kinds_write.insert(name.clone(), node_cfg.client_type);
 
                 // Ensure an initial entry in cache exists so nodes appear immediately on dashboard
                 if !cache_write.contains_key(name) {
@@ -129,6 +144,7 @@ impl FetcherPool {
                                 blocklist_size: 0,
                                 blocklist_enabled: false,
                             },
+                            last_error: None,
                         },
                     );
                 }
@@ -206,15 +222,31 @@ impl FetcherPool {
         }
     }
 
-    /// The most recently detected capabilities for a node, or an all-`false` default if
-    /// it hasn't been probed yet (e.g. right after startup, before the first successful
-    /// poll).
+    /// The most recently detected capabilities for a node, or, before it has been probed
+    /// (right after startup, before the first successful poll), what its kind of backend is
+    /// known to support.
     pub fn get_node_capabilities(&self, node_name: &str) -> NodeCapabilities {
-        self.capabilities
+        if let Some((caps, _)) = self.capabilities.read().get(node_name) {
+            return *caps;
+        }
+        // Not probed yet: what this kind of backend is known to support.
+        self.node_kinds
             .read()
             .get(node_name)
-            .map(|(caps, _)| *caps)
+            .map(|kind| NodeCapabilities::baseline(*kind))
             .unwrap_or_default()
+    }
+
+    /// Every node's capabilities, by node name.
+    pub fn all_node_capabilities(&self) -> HashMap<String, NodeCapabilities> {
+        let names: Vec<String> = self.node_kinds.read().keys().cloned().collect();
+        names
+            .into_iter()
+            .map(|n| {
+                let caps = self.get_node_capabilities(&n);
+                (n, caps)
+            })
+            .collect()
     }
 
     /// True if this node's own daemon should be trusted to manage its tracker circuit
@@ -361,6 +393,7 @@ impl FetcherPool {
                     free_space_bytes: free_space,
                     torrents: unified,
                     stats,
+                    last_error: None,
                 };
 
                 self.cache.write().insert(node_name, cached);
@@ -368,7 +401,7 @@ impl FetcherPool {
             }
             Err(e) => {
                 // Record failure & apply exponential backoff (2s -> 4s -> 8s -> 16s -> max 30s)
-                {
+                let consecutive_errors = {
                     let mut bo_write = self.backoffs.write();
                     let entry = bo_write.entry(node_name.clone()).or_insert_with(|| NodeBackoff {
                         last_poll: Instant::now(),
@@ -381,13 +414,20 @@ impl FetcherPool {
                     entry.backoff_duration = Duration::from_secs((2 * multiplier).min(30));
                     entry.last_poll = Instant::now();
                     entry.last_latency = latency;
-                }
+                    entry.consecutive_errors
+                };
 
                 warn!("Failed to poll fetcher node {}: {}", node_name, e);
                 let mut cache_write = self.cache.write();
                 if let Some(cached) = cache_write.get_mut(&node_name) {
-                    cached.connected = false;
-                    cached.stats.connected = false;
+                    cached.last_error = Some(e.to_string());
+                    // A single slow or dropped poll on a busy daemon isn't an outage: keep
+                    // serving the last good snapshot and only flip to disconnected once the
+                    // failures persist.
+                    if consecutive_errors >= DISCONNECT_AFTER_ERRORS {
+                        cached.connected = false;
+                        cached.stats.connected = false;
+                    }
                 } else {
                     cache_write.insert(
                         node_name.clone(),
@@ -418,6 +458,7 @@ impl FetcherPool {
                                 blocklist_size: 0,
                                 blocklist_enabled: false,
                             },
+                            last_error: Some(e.to_string()),
                         },
                     );
                 }
@@ -496,6 +537,7 @@ impl FetcherPool {
                     blocklist_size: 0,
                     blocklist_enabled: false,
                 },
+                last_error: None,
             },
         );
     }
@@ -772,6 +814,9 @@ impl FetcherPool {
 
                 match res {
                     Ok(_) => ("success".to_string(), format!("{} torrent(s) affected on {}", ids.len(), node)),
+                    Err(e) if e.downcast_ref::<fetcher_core::Unsupported>().is_some() => {
+                        ("unsupported".to_string(), e.to_string())
+                    }
                     Err(e) => ("error".to_string(), e.to_string()),
                 }
             } else {
@@ -832,7 +877,11 @@ impl FetcherPool {
                 last_error: if data.connected {
                     None
                 } else {
-                    Some("RPC connection failed or unreachable".to_string())
+                    Some(
+                        data.last_error
+                            .clone()
+                            .unwrap_or_else(|| "RPC connection failed or unreachable".to_string()),
+                    )
                 },
                 total_torrents: data.stats.total_torrents,
                 active_torrents: data.stats.active_torrents,
@@ -1087,5 +1136,128 @@ impl FetcherPool {
             nodes: node_health,
             trackers: tracker_health,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// A stand-in Transmission that answers RPCs until `down` is set, then drops every
+    /// connection without a reply (what a wedged or overloaded daemon looks like).
+    async fn flaky_transmission(down: Arc<AtomicBool>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                if down.load(Ordering::SeqCst) {
+                    continue; // drop the socket
+                }
+                let mut buf = vec![0u8; 16384];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let body = if req.contains("torrent-get") {
+                    r#"{"result":"success","arguments":{"torrents":[{"id":1,"name":"a","hashString":"aa"}]}}"#
+                } else {
+                    r#"{"result":"success","arguments":{}}"#
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        port
+    }
+
+    /// The health overview reads the cache and, for each node, its capabilities, while the
+    /// poller re-syncs the node list (which takes the client and cache write locks). If the
+    /// capability lookup ever takes a lock the syncer holds while waiting for the cache, the two
+    /// deadlock and every request that touches the pool hangs.
+    #[test]
+    fn health_overview_and_node_sync_do_not_deadlock_each_other() {
+        let mut config = crate::config::AppConfig::default();
+        let cfg: fetcher_core::FetcherNodeConfig = serde_json::from_value(serde_json::json!({
+            "name": "n", "client_type": "transmission", "host": "127.0.0.1", "port": 1,
+            "rpc_path": "/transmission/rpc", "enabled": true
+        }))
+        .unwrap();
+        config.nodes.insert("n".into(), cfg);
+
+        let pool = Arc::new(FetcherPool::new());
+        pool.sync_nodes_from_config(&config);
+        // A torrent with a tracker, so the overview reaches the per-tracker capability lookup.
+        let torrent: fetcher_core::Torrent = serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "t", "hashString": "aa",
+            "trackerStats": [{"announce": "http://t.example/announce", "host": "t.example"}]
+        }))
+        .unwrap();
+        pool.update_node_cache("n", vec![torrent], 0, 1);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = {
+            let (pool, tx) = (pool.clone(), tx.clone());
+            std::thread::spawn(move || {
+                for _ in 0..50_000 {
+                    pool.get_system_health();
+                }
+                let _ = tx.send("health");
+            })
+        };
+        let syncer = {
+            let (pool, tx) = (pool.clone(), tx);
+            std::thread::spawn(move || {
+                for _ in 0..50_000 {
+                    pool.sync_nodes_from_config(&config);
+                }
+                let _ = tx.send("sync");
+            })
+        };
+        for _ in 0..2 {
+            rx.recv_timeout(std::time::Duration::from_secs(30))
+                .expect("deadlock: health overview and node sync are waiting on each other");
+        }
+        reader.join().unwrap();
+        syncer.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_brief_stall_is_not_an_outage_but_a_lasting_one_is_and_says_why() {
+        let down = Arc::new(AtomicBool::new(false));
+        let port = flaky_transmission(down.clone()).await;
+        let cfg: fetcher_core::FetcherNodeConfig = serde_json::from_value(serde_json::json!({
+            "name": "slow", "client_type": "transmission", "host": "127.0.0.1", "port": port,
+            "rpc_path": "/transmission/rpc", "enabled": true
+        }))
+        .unwrap();
+        let pool = FetcherPool::new();
+        let client = crate::downloader::create_client(cfg);
+
+        pool.poll_node(client.clone()).await.unwrap();
+        assert!(pool.get_system_health().nodes[0].connected);
+
+        down.store(true, Ordering::SeqCst);
+        for _ in 0..(DISCONNECT_AFTER_ERRORS - 1) {
+            assert!(pool.poll_node(client.clone()).await.is_err());
+            let node = &pool.get_system_health().nodes[0];
+            assert!(node.connected, "still serving the last good snapshot");
+            assert_eq!(node.total_torrents, 1);
+        }
+
+        assert!(pool.poll_node(client.clone()).await.is_err());
+        let node = &pool.get_system_health().nodes[0];
+        assert!(!node.connected);
+        let why = node.last_error.clone().unwrap();
+        assert_ne!(why, "RPC connection failed or unreachable", "the real cause is reported");
+
+        down.store(false, Ordering::SeqCst);
+        pool.poll_node(client).await.unwrap();
+        assert!(pool.get_system_health().nodes[0].connected);
     }
 }

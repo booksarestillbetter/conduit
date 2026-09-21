@@ -1,10 +1,12 @@
 // web/src/pages/DaemonSettings.tsx
 import React, { useState, useEffect } from 'react';
-import { Sliders, CheckCircle2, XCircle, Gauge, Radio, Folder, Shield, Save, Info } from 'lucide-react';
+import { Sliders, CheckCircle2, XCircle, Gauge, Radio, Folder, Shield, Save } from 'lucide-react';
 import { fetchNodes, fetchNodeSession, updateNodeSession, testNodePort } from '../services/api';
+import { useNodeCapabilities } from '../hooks/useNodeCapabilities';
 import type { NodeStats } from '../types';
 
 export const DaemonSettings: React.FC = () => {
+  const { can } = useNodeCapabilities();
   const [nodes, setNodes] = useState<NodeStats[]>([]);
   const [selectedNode, setSelectedNode] = useState('');
   const [session, setSession] = useState<any>(null);
@@ -24,22 +26,15 @@ export const DaemonSettings: React.FC = () => {
     });
   }, []);
 
-  const selectedNodeInfo = nodes.find((n) => n.node === selectedNode);
-  // synapse.v2 has no session-settings RPC (bandwidth/alt-speed/peer-limit/blocklist are all
-  // Transmission-RPC-shaped concepts synapse doesn't expose a way to change) — this whole form
-  // would silently do nothing on save for a synapse node, so it's swapped for an explanatory
-  // notice below rather than presenting controls that don't work.
-  const isSynapseNode = selectedNodeInfo?.client_type === 'synapse';
 
   useEffect(() => {
-    if (selectedNode && !isSynapseNode) {
+    if (selectedNode) {
       loadNodeSession(selectedNode);
     } else {
       setSession(null);
       setLoading(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedNode, isSynapseNode]);
+  }, [selectedNode]);
 
   const loadNodeSession = async (name: string) => {
     setLoading(true);
@@ -59,21 +54,13 @@ export const DaemonSettings: React.FC = () => {
     setSaving(true);
     setStatusMsg('');
     try {
-      await updateNodeSession(selectedNode, {
-        'download-dir': session['download-dir'],
-        'speed-limit-down': Number(session['speed-limit-down']),
-        'speed-limit-down-enabled': session['speed-limit-down-enabled'],
-        'speed-limit-up': Number(session['speed-limit-up']),
-        'speed-limit-up-enabled': session['speed-limit-up-enabled'],
-        'alt-speed-down': Number(session['alt-speed-down']),
-        'alt-speed-up': Number(session['alt-speed-up']),
-        'alt-speed-enabled': session['alt-speed-enabled'],
-        'peer-limit-global': Number(session['peer-limit-global']),
-        'peer-limit-per-torrent': Number(session['peer-limit-per-torrent']),
-        'peer-port': Number(session['peer-port']),
-        'dht-enabled': session['dht-enabled'],
-        'pex-enabled': session['pex-enabled'],
-      });
+      // Only send what this node reported, so a daemon is never told about settings it doesn't have.
+      const numeric = ['speed-limit-down', 'speed-limit-up', 'alt-speed-down', 'alt-speed-up', 'peer-limit-global', 'peer-limit-per-torrent', 'peer-port'];
+      const passthrough = ['download-dir', 'speed-limit-down-enabled', 'speed-limit-up-enabled', 'alt-speed-enabled', 'dht-enabled', 'pex-enabled', 'lpd-enabled', 'utp-enabled', 'synapse-dht-read-only', 'synapse-zeroconf', 'synapse-announce-ip'];
+      const payload: Record<string, unknown> = {};
+      numeric.forEach((k) => { if (session[k] !== undefined) payload[k] = Number(session[k]); });
+      passthrough.forEach((k) => { if (session[k] !== undefined) payload[k] = session[k]; });
+      await updateNodeSession(selectedNode, payload);
       setStatusMsg('Daemon settings updated successfully!');
       setTimeout(() => setStatusMsg(''), 3000);
     } catch (err: any) {
@@ -120,7 +107,7 @@ export const DaemonSettings: React.FC = () => {
 
           <button
             onClick={handleSave}
-            disabled={saving || !session || isSynapseNode}
+            disabled={saving || !session}
             className="flex items-center space-x-2 rounded-xl bg-brand-600 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-brand-500/20 hover:bg-brand-500 disabled:opacity-50"
           >
             <Save className="h-4 w-4" />
@@ -135,20 +122,7 @@ export const DaemonSettings: React.FC = () => {
         </div>
       )}
 
-      {isSynapseNode ? (
-        <div className="rounded-2xl border border-sky-900/40 bg-sky-950/20 p-6 text-sky-300 flex items-start space-x-3 max-w-3xl">
-          <Info className="h-5 w-5 shrink-0 mt-0.5" />
-          <div className="space-y-1">
-            <p className="font-semibold text-sky-200">Not available for Synapse nodes</p>
-            <p className="text-sm text-sky-300/90">
-              Bandwidth limits, alternate speed schedules, peer limits, and blocklists here are all Transmission RPC
-              settings — Synapse doesn't have an equivalent settings RPC yet, only live stats. Use the node's own{' '}
-              <code className="rounded bg-sky-950/60 px-1 py-0.5 text-xs">synapse.toml</code> to configure rate limits
-              and peer settings for this daemon directly.
-            </p>
-          </div>
-        </div>
-      ) : loading ? (
+      {loading ? (
         <div className="p-8 text-slate-400">Loading daemon options...</div>
       ) : !session ? (
         <div className="rounded-2xl border border-rose-900/40 bg-rose-950/20 p-6 text-rose-400">
@@ -276,6 +250,7 @@ export const DaemonSettings: React.FC = () => {
                 </div>
               </div>
 
+              {session['peer-port'] !== undefined && (
               <div className="border-t border-slate-800 pt-3">
                 <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">
                   Incoming Peer Port
@@ -289,8 +264,9 @@ export const DaemonSettings: React.FC = () => {
                   />
                   <button
                     onClick={handleTestPort}
-                    disabled={testingPort}
-                    className="rounded-lg bg-slate-800 px-4 py-1.5 text-xs font-semibold text-sky-400 hover:bg-slate-700"
+                    disabled={testingPort || !can(selectedNode, 'test_port')}
+                    title={can(selectedNode, 'test_port') ? undefined : "This node's daemon cannot test its port"}
+                    className="rounded-lg bg-slate-800 px-4 py-1.5 text-xs font-semibold text-sky-400 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {testingPort ? 'Testing...' : 'Test Port'}
                   </button>
@@ -311,10 +287,62 @@ export const DaemonSettings: React.FC = () => {
                   )}
                 </div>
               </div>
+              )}
             </div>
           </div>
+
+          {/* Peer discovery & transport: only the switches this node actually has */}
+          {DISCOVERY_TOGGLES.some((t) => session[t.key] !== undefined) && (
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 space-y-4 md:col-span-2">
+              <h2 className="text-base font-bold text-slate-200 flex items-center space-x-2">
+                <Shield className="h-5 w-5 text-emerald-400" />
+                <span>Peer Discovery & Transport</span>
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {DISCOVERY_TOGGLES.filter((t) => session[t.key] !== undefined).map((t) => (
+                  <label key={t.key} className="flex items-start space-x-2 text-sm text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={!!session[t.key]}
+                      onChange={(e) => setSession({ ...session, [t.key]: e.target.checked })}
+                      className="mt-0.5 rounded border-slate-700 bg-slate-800 text-brand-600 focus:ring-brand-500"
+                    />
+                    <span>
+                      <span className="font-semibold">{t.label}</span>
+                      <span className="block text-xs text-slate-500">{t.hint}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {session['synapse-announce-ip'] !== undefined && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                    Announce address
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Let the tracker decide"
+                    value={session['synapse-announce-ip']}
+                    onChange={(e) => setSession({ ...session, 'synapse-announce-ip': e.target.value })}
+                    className="w-64 rounded-lg border border-slate-700 bg-slate-800 py-1.5 px-3 text-sm text-slate-200 focus:border-brand-500 focus:outline-none"
+                  />
+                  <p className="mt-1 text-xs text-slate-500">The address trackers are told to reach this node at (VPN / NAT setups). Leave empty for automatic.</p>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 };
+
+/** Switches shown when the selected node reports them (Synapse-only ones are prefixed `synapse-`). */
+const DISCOVERY_TOGGLES: { key: string; label: string; hint: string }[] = [
+  { key: 'dht-enabled', label: 'DHT', hint: 'Find peers through the distributed hash table (public torrents only).' },
+  { key: 'pex-enabled', label: 'Peer exchange (PEX)', hint: 'Learn peers from the peers we are connected to.' },
+  { key: 'lpd-enabled', label: 'Local peer discovery', hint: 'Find peers on the local network.' },
+  { key: 'utp-enabled', label: 'uTP transport', hint: 'Use uTP (BEP 29) alongside TCP.' },
+  { key: 'synapse-dht-read-only', label: 'DHT read-only', hint: 'Query the DHT without answering queries or being added to other nodes\' tables (BEP 43).' },
+  { key: 'synapse-zeroconf', label: 'Zeroconf (mDNS)', hint: 'Advertise and discover peers on the LAN with multicast DNS (BEP 26).' },
+];

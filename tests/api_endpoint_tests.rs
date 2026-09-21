@@ -350,7 +350,7 @@ async fn test_sync_classification_and_events_endpoints() {
         "node": "test_node",
         "tracker": "http://tracker.example.com/announce"
     });
-    let resp = send_request(&ctx.router, Method::POST, "/api/sync/classify", None, Some(classify_payload)).await;
+    let resp = send_request(&ctx.router, Method::POST, "/api/sync/classify", Some(&ctx.admin_token), Some(classify_payload)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let class_res = response_json(resp).await;
     assert_eq!(class_res["media_type"], "tv");
@@ -370,7 +370,7 @@ async fn test_sync_classification_and_events_endpoints() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // 4. GET /api/sync/hook-script (Generates bash staging script)
-    let resp = send_request(&ctx.router, Method::GET, "/api/sync/hook-script", None, None).await;
+    let resp = send_request(&ctx.router, Method::GET, "/api/sync/hook-script", Some(&ctx.admin_token), None).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     // 5. GET /api/events (Audit logs query)
@@ -450,8 +450,8 @@ async fn test_system_health_and_metrics_endpoints() {
     let health_json = response_json(resp).await;
     assert_eq!(health_json["status"], "ok");
 
-    // 2. GET /metrics (Prometheus exposition format)
-    let resp = send_request(&ctx.router, Method::GET, "/metrics", None, None).await;
+    // 2. GET /metrics (Prometheus exposition format; needs a token by default)
+    let resp = send_request(&ctx.router, Method::GET, "/metrics", Some(&ctx.admin_token), None).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     // 3. GET /api/system/stats
@@ -705,3 +705,156 @@ async fn test_mobile_qr_pairing_lifecycle() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+
+/// Every route is reachable only with credentials, apart from the ones that are public on
+/// purpose: sign-in and first-run setup, the health probe, inbound webhooks (which check their
+/// own shared secret), the WebSocket (which needs a single-use ticket) and the Swagger UI.
+/// Routes are read from the router source, so a route added later is covered without editing
+/// this test.
+#[tokio::test]
+async fn every_route_requires_credentials_unless_it_is_public_on_purpose() {
+    let ctx = setup_test_context().await;
+
+    const PUBLIC: &[&str] = &[
+        "/api/auth/setup-status",
+        "/api/auth/setup",
+        "/api/auth/login",
+        "/api/auth/logout",
+        "/api/health",
+        "/api/ws",
+        // Redeems a single-use, three-minute pairing code shown as a QR code by a signed-in user.
+        "/api/auth/mobile/pair",
+    ];
+    let is_webhook = |p: &str| p.contains("inbound") || p.starts_with("/webhook/") || p.starts_with("/api/webhook");
+
+    let src = include_str!("../src/api/mod.rs");
+    let mut open: Vec<String> = Vec::new();
+    let mut checked = 0;
+    let mut rest = src;
+    while let Some(i) = rest.find(".route(") {
+        rest = &rest[i + ".route(".len()..];
+        let Some(q1) = rest.find('"') else { break };
+        let Some(q2) = rest[q1 + 1..].find('"') else { break };
+        let path = &rest[q1 + 1..q1 + 1 + q2];
+        // The handler expression runs to the end of the line.
+        let line = rest[q1 + 1 + q2..].lines().next().unwrap_or("");
+        if PUBLIC.contains(&path) || is_webhook(path) {
+            continue;
+        }
+        let concrete = path.replace(['{', '}'], "");
+        let mut methods = Vec::new();
+        for (needle, method) in [("get(", Method::GET), ("post(", Method::POST), ("put(", Method::PUT), ("delete(", Method::DELETE), ("patch(", Method::PATCH)] {
+            if line.contains(needle) {
+                methods.push(method);
+            }
+        }
+        for method in methods {
+            let resp = send_request(&ctx.router, method.clone(), &concrete, None, None).await;
+            checked += 1;
+            if !matches!(resp.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                open.push(format!("{method} {path} -> {}", resp.status()));
+            }
+        }
+    }
+    assert!(checked >= 70, "the route scan found only {checked} routes; the parser is out of date");
+    assert!(open.is_empty(), "routes reachable without credentials:\n  {}", open.join("\n  "));
+}
+
+#[tokio::test]
+async fn metrics_need_a_token_unless_the_operator_makes_them_public() {
+    let ctx = setup_test_context().await;
+
+    let anon = send_request(&ctx.router, Method::GET, "/metrics", None, None).await;
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(anon.headers().get(header::WWW_AUTHENTICATE).unwrap(), "Bearer");
+
+    let authed = send_request(&ctx.router, Method::GET, "/metrics", Some(&ctx.admin_token), None).await;
+    assert_eq!(authed.status(), StatusCode::OK);
+    let body = to_bytes(authed.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("conduit_app_info"));
+
+    // Opting in makes the endpoint anonymous again, for a scraper that cannot send a token.
+    let mut config = ctx.config_mgr.get().await;
+    config.system.metrics_public = true;
+    ctx.config_mgr.update(config).await.unwrap();
+    let public = send_request(&ctx.router, Method::GET, "/metrics", None, None).await;
+    assert_eq!(public.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_formerly_open_endpoints_work_with_a_token() {
+    let ctx = setup_test_context().await;
+    for uri in ["/api/system/stats", "/api/system/health", "/api/system/engines", "/api/plex/scrobbles", "/api/ombi/requests"] {
+        let resp = send_request(&ctx.router, Method::GET, uri, Some(&ctx.admin_token), None).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    }
+}
+
+fn node_config(name: &str, client_type: conduit::config::RetrieverClientType) -> FetcherNodeConfig {
+    FetcherNodeConfig {
+        client_type,
+        name: name.to_string(),
+        // Nothing listens here: an operation that reaches the network fails, one the backend
+        // refuses up front does not.
+        host: "127.0.0.1".to_string(),
+        port: 1,
+        rpc_path: "/".to_string(),
+        username: None,
+        password: None,
+        use_ssl: false,
+        verify_tls: true,
+        enabled: true,
+        fetcher_only: false,
+        tv_pre: None,
+        movie_pre: None,
+        music_pre: None,
+        auto_purge_min_space_gb: None,
+        auto_purge_ratio: None,
+        auto_purge_age_days: None,
+        auto_purge_seeds: None,
+        auto_purge_match_count: None,
+        auto_purge_enabled: false,
+        media_dir_overrides: HashMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn what_a_backend_cannot_do_is_a_501_with_the_reason_and_the_ui_can_see_it_coming() {
+    use conduit::config::RetrieverClientType as Kind;
+    let ctx = setup_test_context().await;
+
+    let mut config = ctx.config_mgr.get().await;
+    config.nodes.insert("qbit".into(), node_config("qbit", Kind::QBittorrent));
+    config.nodes.insert("deluge".into(), node_config("deluge", Kind::Deluge));
+    ctx.pool.sync_nodes_from_config(&config);
+
+    // The capability map tells a client which buttons to offer, per node.
+    let resp = send_request(&ctx.router, Method::GET, "/api/nodes/capabilities", Some(&ctx.admin_token), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let caps = response_json(resp).await;
+    assert_eq!(caps["test_node"]["test_port"], true, "Transmission really tests its port");
+    assert_eq!(caps["qbit"]["test_port"], false);
+    assert_eq!(caps["qbit"]["blocklist_update"], false);
+    assert_eq!(caps["deluge"]["turtle_mode"], false);
+    assert_eq!(caps["deluge"]["queue_move"], true);
+
+    // Asking anyway is a 501 that says why, never a fabricated success.
+    let cases = [
+        (Method::POST, "/api/nodes/qbit/test-port", "qBittorrent has no port-check API"),
+        (Method::POST, "/api/nodes/deluge/test-port", "Deluge has no port-check API"),
+        (Method::POST, "/api/nodes/qbit/blocklist-update", "qBittorrent has no built-in blocklist"),
+        (Method::POST, "/api/nodes/deluge/turtle-mode", "Deluge has no alternate-speed toggle"),
+    ];
+    for (method, uri, reason) in cases {
+        let body = (uri.ends_with("turtle-mode")).then(|| json!({"enabled": true}));
+        let resp = send_request(&ctx.router, method, uri, Some(&ctx.admin_token), body).await;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{uri}");
+        let v = response_json(resp).await;
+        assert!(v["error"].as_str().unwrap().contains(reason), "{uri}: {v}");
+        assert_eq!(v["unsupported"], true);
+    }
+
+    // A real failure (the daemon is unreachable) is still a 500, not mistaken for "unsupported".
+    let resp = send_request(&ctx.router, Method::POST, "/api/nodes/test_node/test-port", Some(&ctx.admin_token), None).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}

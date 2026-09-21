@@ -332,11 +332,79 @@ impl SynapseClient {
         Ok(resp.into_inner())
     }
 
+    /// Subscribes to the daemon's alert stream (torrent finished, peer banned, tracker announced,
+    /// ...), optionally only for one torrent (40-character hex info hash).
+    pub async fn subscribe_alerts(
+        &self,
+        info_hash: Option<&str>,
+    ) -> Result<tonic::Streaming<AlertEvent>> {
+        let req = self.request(SubscribeAlertsRequest {
+            info_hash: info_hash.map(str::to_string),
+        });
+        let resp = self.inner.clone().subscribe_alerts(req).await?;
+        Ok(resp.into_inner())
+    }
+
     /// Subscribes to periodic global session stats telemetry.
     pub async fn subscribe_session_stats(&self) -> Result<tonic::Streaming<SessionStatsUpdate>> {
         let req = self.request(SessionStatsRequest {});
         let resp = self.inner.clone().subscribe_session_stats(req).await?;
         Ok(resp.into_inner())
+    }
+
+    // --- Queue, picking, trackers, blocklist ---
+
+    /// Moves torrents within the download queue. `direction` is `top`, `up`, `down` or `bottom`.
+    pub async fn move_in_queue(&self, hashes: &[String], direction: &str) -> Result<CommandResponse> {
+        let direction = match direction.to_lowercase().as_str() {
+            "top" => move_in_queue_request::Direction::Top,
+            "up" => move_in_queue_request::Direction::Up,
+            "down" => move_in_queue_request::Direction::Down,
+            "bottom" => move_in_queue_request::Direction::Bottom,
+            other => {
+                return Err(SynapseClientError::Rpc {
+                    code: tonic::Code::InvalidArgument,
+                    message: format!("invalid queue move direction '{other}'"),
+                })
+            }
+        };
+        let req = self.request(MoveInQueueRequest {
+            hashes: hashes.to_vec(),
+            direction: direction as i32,
+        });
+        Ok(self.inner.clone().move_in_queue(req).await?.into_inner())
+    }
+
+    /// Turns in-order piece picking on or off for the given torrents.
+    pub async fn set_sequential_download(&self, hashes: &[String], enabled: bool) -> Result<CommandResponse> {
+        let req = self.request(SequentialDownloadRequest {
+            hashes: hashes.to_vec(),
+            enabled,
+        });
+        Ok(self.inner.clone().set_sequential_download(req).await?.into_inner())
+    }
+
+    /// Announces to the given torrents' trackers now.
+    pub async fn reannounce_torrents(&self, hashes: &[String]) -> Result<CommandResponse> {
+        let req = self.request(TorrentHashesRequest {
+            hashes: hashes.to_vec(),
+        });
+        Ok(self.inner.clone().reannounce_torrents(req).await?.into_inner())
+    }
+
+    /// Replaces a torrent's trackers. An empty list restores the ones in its metainfo.
+    pub async fn replace_trackers(&self, hash: &str, trackers: Vec<String>) -> Result<CommandResponse> {
+        let req = self.request(ReplaceTrackersRequest {
+            hash: hash.to_string(),
+            trackers,
+        });
+        Ok(self.inner.clone().replace_trackers(req).await?.into_inner())
+    }
+
+    /// Re-reads the daemon's IP filter from its configured sources; returns the rule count.
+    pub async fn reload_ip_filter(&self) -> Result<u32> {
+        let req = self.request(Empty {});
+        Ok(self.inner.clone().reload_ip_filter(req).await?.into_inner().rules)
     }
 
     // --- Capability Negotiation & Circuit Breaker Control ---

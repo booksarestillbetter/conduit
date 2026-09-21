@@ -1,5 +1,5 @@
 // src/api/metrics_routes.rs
-use crate::auth::{AppState, RequireAuth};
+use crate::auth::{AppState, OptionalAuth, RequireAuth};
 use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
 use serde_json::json;
@@ -27,10 +27,21 @@ pub struct HostSystemStats {
     summary = "Prometheus metrics exposition",
     description = "Prometheus text exposition format endpoint exposing aggregate speeds, torrent counts, and storage metrics.",
     responses(
-        (status = 200, description = "Prometheus metrics text", content_type = "text/plain")
+        (status = 200, description = "Prometheus metrics text", content_type = "text/plain"),
+        (status = 401, description = "Authentication required (unless system.metrics_public is set)")
     )
 )]
-pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn prometheus_metrics(State(state): State<AppState>, OptionalAuth(auth): OptionalAuth) -> axum::response::Response {
+    // The exposition lists node names and counts: it needs a credential (a bearer or API token
+    // works for Prometheus) unless `system.metrics_public` says otherwise.
+    if auth.is_none() && !state.config.get().await.system.metrics_public {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+            "metrics require authentication (send a bearer token, or set system.metrics_public)\n",
+        )
+            .into_response();
+    }
     let stats = state.fetcher_pool.get_aggregate_stats();
     let health = state.fetcher_pool.get_system_health();
     let config = state.config.get().await;
@@ -133,6 +144,7 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         output,
     )
+        .into_response()
 }
 
 #[utoipa::path(
@@ -145,7 +157,7 @@ pub async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoRespo
         (status = 200, description = "Host hardware telemetry", body = HostSystemStats)
     )
 )]
-pub async fn get_system_stats() -> Result<Json<HostSystemStats>, StatusCode> {
+pub async fn get_system_stats(_auth: RequireAuth) -> Result<Json<HostSystemStats>, StatusCode> {
     let mut sys = System::new_all();
     sys.refresh_all();
 
@@ -168,7 +180,7 @@ pub async fn get_system_stats() -> Result<Json<HostSystemStats>, StatusCode> {
         (status = 200, description = "Cluster and tracker health telemetry", body = crate::fetcher::SystemHealthOverview)
     )
 )]
-pub async fn get_system_health(State(state): State<AppState>) -> Result<Json<crate::fetcher::SystemHealthOverview>, StatusCode> {
+pub async fn get_system_health(_auth: RequireAuth, State(state): State<AppState>) -> Result<Json<crate::fetcher::SystemHealthOverview>, StatusCode> {
     let overview = state.fetcher_pool.get_system_health();
     Ok(Json(overview))
 }
@@ -315,7 +327,7 @@ pub async fn force_reset_circuit_breaker(
         (status = 200, description = "Background engine health snapshot", body = [crate::engines::registry::EngineStatus])
     )
 )]
-pub async fn get_engine_health(State(state): State<AppState>) -> Result<Json<Vec<crate::engines::registry::EngineStatus>>, StatusCode> {
+pub async fn get_engine_health(_auth: RequireAuth, State(state): State<AppState>) -> Result<Json<Vec<crate::engines::registry::EngineStatus>>, StatusCode> {
     Ok(Json(crate::engines::registry::snapshot(&state.engine_registry)))
 }
 

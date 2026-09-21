@@ -1,7 +1,4 @@
 # Conduit
-[![Rust Build](https://github.com/booksarestillbetter/conduit/actions/workflows/rust.yml/badge.svg)](https://github.com/booksarestillbetter/conduit/actions/workflows/rust.yml)
-[![Version 0.16.0](https://img.shields.io/badge/version-0.16.0-blue.svg)](CHANGELOG.md)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **A unified, multi-node fetcher control plane (Synapse, Transmission, qBittorrent, Deluge) and Sonarr/Radarr/Lidarr/Plex media lifecycle automation daemon — written in Rust, with a React + Tailwind web UI.**
 
@@ -146,7 +143,7 @@ Per-node free-space thresholds (never aggregated across nodes) trigger automatic
 | **Ombi** | ✅ Request/issue webhook ingestion with dog-themed lifecycle notifications |
 | **Trakt** | ✅ Watch-history sync from Plex scrobbles, with optional multi-server watch-status backup/sync using Trakt as the hub |
 | **Mattermost / Discord / Generic Webhooks** | ✅ Rich card notifications for every lifecycle event |
-| **Prometheus** | ✅ `/metrics` scrape endpoint |
+| **Prometheus** | ✅ `/metrics` scrape endpoint (bearer token required; set `system.metrics_public = true` to scrape without one) |
 | **InfluxDB v2** | ✅ Cluster telemetry line-protocol pusher |
 
 **Multi-tenant "zones"** (0.8.0+): run fully independent stacks side by side — e.g. a general library and a separate 4K library, each with its own Sonarr/Radarr/Lidarr instance and a subset of your Plex servers and fetcher nodes — with both a combined view and a per-zone view (sidebar switcher, zone-scoped webhook URLs, per-zone grab history, per-zone live Sonarr/Radarr telemetry). Purely opt-in: with no zones configured, Conduit behaves exactly as a single-instance setup.
@@ -207,10 +204,13 @@ cargo test
 
 ## 🔌 Fetcher Intake Hook Integration (`copy2queue.py`)
 
-Download your pre-configured intake hook script directly from Conduit:
+Download your pre-configured intake hook script directly from Conduit. The endpoint needs a
+credential (an API token from Settings → API Tokens works well, and is the same one the hook
+sends back to Conduit at runtime):
 ```bash
 # Download Python hook
-curl -s http://localhost:4242/api/sync/hook-script?format=py -o /usr/local/bin/copy2queue.py
+curl -s -H "Authorization: Bearer $CONDUIT_API_KEY" \
+  "http://localhost:4242/api/sync/hook-script?format=py" -o /usr/local/bin/copy2queue.py
 chmod +x /usr/local/bin/copy2queue.py
 ```
 

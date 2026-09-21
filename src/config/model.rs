@@ -99,6 +99,11 @@ pub struct SystemConfig {
     pub log_level: String,
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
+    /// Serve `/metrics` without credentials. Off by default: the endpoint lists node names and
+    /// counts, so Prometheus should scrape it with a bearer token (an API token works). Turn this
+    /// on only for a scraper that cannot send one.
+    #[serde(default = "default_false")]
+    pub metrics_public: bool,
     #[serde(default = "default_false")]
     pub ssl_enabled: bool,
     #[serde(default)]
@@ -149,6 +154,7 @@ impl Default for SystemConfig {
             enable_registration: true,
             log_level: default_log_level(),
             data_dir: default_data_dir(),
+            metrics_public: false,
             ssl_enabled: false,
             ssl_cert: None,
             ssl_key: None,

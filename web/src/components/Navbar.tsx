@@ -8,7 +8,8 @@ import {
   Sparkles,
   ScrollText,
 } from 'lucide-react';
-import { AggregateStats, UserRecord, APP_VERSION } from '../types';
+import { AggregateStats, UserRecord } from '../types';
+import { useServerVersion } from '../hooks/useServerVersion';
 import { enrichAllTorrents, toggleTurtleModeAll } from '../services/api';
 
 interface NavbarProps {
@@ -49,6 +50,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   isConnected,
   dashboardTitle,
 }) => {
+  const appVersion = useServerVersion();
   return (
     <header className="sticky top-0 z-30 flex h-16 w-full items-center justify-between border-b border-slate-800 bg-slate-900/80 px-6 backdrop-blur-md">
       {/* Brand & Node Selector */}
@@ -62,7 +64,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             {dashboardTitle || 'Conduit'}
           </span>
           <span className="rounded bg-slate-800/90 px-1.5 py-0.5 text-[10px] font-bold font-mono text-sky-400 border border-slate-700/80 shadow-xs">
-            v{APP_VERSION}
+            v{appVersion}
           </span>
           <div className="flex items-center space-x-1.5 rounded-full bg-slate-800/80 px-2.5 py-0.5 text-xs">
             <span className={`h-2 w-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />

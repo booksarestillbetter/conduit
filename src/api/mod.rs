@@ -4,6 +4,7 @@ pub mod auth_routes;
 pub mod integration_routes;
 pub mod metrics_routes;
 pub mod node_routes;
+pub mod op_error;
 pub mod openapi;
 pub mod plex_oauth_routes;
 pub mod settings_routes;
@@ -66,6 +67,7 @@ pub fn build_api_router(state: AppState) -> Router {
 
         // Nodes & Fetcher Sessions
         .route("/api/nodes", get(node_routes::list_nodes))
+        .route("/api/nodes/capabilities", get(node_routes::get_node_capabilities))
         .route("/api/nodes/turtle-mode", post(node_routes::set_turtle_mode_all))
         .route("/api/nodes/{name}/session", get(node_routes::get_node_session).put(node_routes::update_node_session))
         .route("/api/nodes/{name}/test-port", post(node_routes::test_node_port))

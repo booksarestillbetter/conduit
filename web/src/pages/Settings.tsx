@@ -66,7 +66,9 @@ import {
   sendPlexWebhookTest,
   sendOmbiWebhookTest,
 } from '../services/api';
-import { AppConfig, ApiTokenRecord, ArrNodeConfig, ZoneConfig, ClassifyFileResponse, TransmissionNodeConfig, RemoteSyncFolderMapping, PlexScrobbleRecord, OmbiRequestRecord, APP_VERSION, NotificationChannel, NotificationTarget, NOTIFICATION_CATEGORIES, TrackerCircuitBreakerConfig } from '../types';
+import { useNodeCapabilities } from '../hooks/useNodeCapabilities';
+import { useServerVersion } from '../hooks/useServerVersion';
+import { AppConfig, ApiTokenRecord, ArrNodeConfig, ZoneConfig, ClassifyFileResponse, TransmissionNodeConfig, RemoteSyncFolderMapping, PlexScrobbleRecord, OmbiRequestRecord, NotificationChannel, NotificationTarget, NOTIFICATION_CATEGORIES, TrackerCircuitBreakerConfig } from '../types';
 
 const DEFAULT_TRACKER_CB_CONFIG: TrackerCircuitBreakerConfig = {
   enabled: true,
@@ -167,6 +169,8 @@ export const Settings: React.FC = () => {
   const [newMappingDeleteSource, setNewMappingDeleteSource] = useState(false);
 
   // Embedded Node Transmission RPC Modal
+  const { can } = useNodeCapabilities();
+  const appVersion = useServerVersion();
   const [editingDaemonNode, setEditingDaemonNode] = useState<string | null>(null);
   const [daemonSession, setDaemonSession] = useState<any>(null);
   const [loadingSession, setLoadingSession] = useState(false);
@@ -683,7 +687,7 @@ export const Settings: React.FC = () => {
           <div className="flex items-center space-x-2.5">
             <h1 className="text-2xl font-bold text-slate-100">Conduit Application Settings</h1>
             <span className="rounded bg-slate-800 px-2 py-0.5 text-xs font-bold font-mono text-sky-400 border border-slate-700">
-              v{APP_VERSION}
+              v{appVersion}
             </span>
           </div>
           <p className="text-sm text-slate-400 mt-1">Manage ecosystem nodes, media sync paths, automation pipelines, and vault.</p>
@@ -3029,7 +3033,7 @@ export const Settings: React.FC = () => {
               {(() => {
                 const host = window.location.origin;
                 const ext = scriptFormat === 'py' ? 'py' : scriptFormat === 'pl' ? 'pl' : 'sh';
-                const curlCmd = `curl -sSL "${host}/api/sync/hook-script?format=${scriptFormat}" -o /opt/transmission/conduit-fetch-hook.${ext} && chmod +x /opt/transmission/conduit-fetch-hook.${ext}`;
+                const curlCmd = `curl -sSL -H "Authorization: Bearer $CONDUIT_API_KEY" "${host}/api/sync/hook-script?format=${scriptFormat}" -o /opt/transmission/conduit-fetch-hook.${ext} && chmod +x /opt/transmission/conduit-fetch-hook.${ext}`;
 
                 return (
                   <div className="flex items-center space-x-2 rounded-xl border border-slate-800 bg-slate-950 p-2.5 font-mono text-xs text-sky-300">
@@ -3424,6 +3428,19 @@ export const Settings: React.FC = () => {
                   onChange={(e) => setConfig({ ...config, trakt: { ...config.trakt, access_token: e.target.value || undefined } })}
                   className="w-full rounded-lg border border-slate-700 bg-slate-800 py-2 px-3 text-sm text-slate-200 focus:border-brand-500 focus:outline-none"
                 />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Refresh Token</label>
+                <input
+                  type="password"
+                  value={config.trakt.refresh_token || ''}
+                  placeholder="OAuth Refresh Token (optional)"
+                  onChange={(e) => setConfig({ ...config, trakt: { ...config.trakt, refresh_token: e.target.value || undefined } })}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 py-2 px-3 text-sm text-slate-200 focus:border-brand-500 focus:outline-none"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  With the client secret and a refresh token, Conduit renews the access token before it expires and saves the new pair itself.
+                </p>
               </div>
             </div>
 
@@ -4945,8 +4962,9 @@ export const Settings: React.FC = () => {
                     <button
                       type="button"
                       onClick={handleTestPort}
-                      disabled={testingPort}
-                      className="rounded-lg bg-slate-800 px-4 py-1.5 text-xs font-semibold text-sky-400 hover:bg-slate-700"
+                      disabled={testingPort || !can(editingDaemonNode, 'test_port')}
+                      title={can(editingDaemonNode, 'test_port') ? undefined : "This node's daemon cannot test its port"}
+                      className="rounded-lg bg-slate-800 px-4 py-1.5 text-xs font-semibold text-sky-400 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {testingPort ? 'Testing...' : 'Test Peer Port'}
                     </button>
@@ -4991,7 +5009,9 @@ export const Settings: React.FC = () => {
                           alert(`Blocklist update failed: ${err.message}`);
                         }
                       }}
-                      className="px-3 py-1 rounded bg-slate-800 text-xs font-semibold text-slate-200 hover:bg-slate-700 hover:text-brand-400 transition-colors"
+                      disabled={!can(editingDaemonNode, 'blocklist_update')}
+                      title={can(editingDaemonNode, 'blocklist_update') ? undefined : "This node's daemon has no blocklist to update"}
+                      className="px-3 py-1 rounded bg-slate-800 text-xs font-semibold text-slate-200 hover:bg-slate-700 hover:text-brand-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       Update Blocklist Now
                     </button>

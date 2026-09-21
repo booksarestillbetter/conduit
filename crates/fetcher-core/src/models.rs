@@ -9,6 +9,93 @@ use crate::config::RetrieverClientType;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct NodeCapabilities {
     pub native_tracker_circuit_breaker: bool,
+    /// Reorder torrents in the download queue.
+    pub queue_move: bool,
+    /// Download a torrent's pieces in order.
+    pub sequential_download: bool,
+    /// Announce to trackers on demand.
+    pub reannounce: bool,
+    /// Change a torrent's trackers.
+    pub replace_trackers: bool,
+    /// Refresh the daemon's IP blocklist.
+    pub blocklist_update: bool,
+    /// Rename a torrent's files or folders.
+    pub rename_path: bool,
+    /// Check that the daemon's listen port is reachable from outside.
+    pub test_port: bool,
+    /// Switch the alternate ("turtle") speed limits on and off.
+    pub turtle_mode: bool,
+}
+
+impl NodeCapabilities {
+    /// What each kind of backend supports before (or without) asking the daemon. Synapse is
+    /// conservative here: its optional operations are only known once the daemon lists them.
+    pub fn baseline(client: RetrieverClientType) -> Self {
+        let all = Self {
+            native_tracker_circuit_breaker: false,
+            queue_move: true,
+            sequential_download: true,
+            reannounce: true,
+            replace_trackers: true,
+            blocklist_update: true,
+            rename_path: true,
+            test_port: true,
+            turtle_mode: true,
+        };
+        match client {
+            RetrieverClientType::Transmission => all,
+            RetrieverClientType::QBittorrent => Self {
+                blocklist_update: false,
+                test_port: false,
+                ..all
+            },
+            RetrieverClientType::Deluge => Self {
+                blocklist_update: false,
+                test_port: false,
+                turtle_mode: false,
+                ..all
+            },
+            RetrieverClientType::Synapse => Self {
+                queue_move: false,
+                sequential_download: false,
+                reannounce: false,
+                replace_trackers: false,
+                blocklist_update: false,
+                rename_path: false,
+                test_port: false,
+                ..all
+            },
+        }
+    }
+}
+
+/// An operation the backend cannot perform at all (as opposed to one that failed). The API
+/// turns this into `501 Not Implemented` with the message, rather than a generic 500.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsupported(pub String);
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unsupported {}
+
+/// Shorthand for returning an [`Unsupported`] error from an adapter.
+pub fn unsupported(message: impl Into<String>) -> anyhow::Error {
+    Unsupported(message.into()).into()
+}
+
+/// A live event a node pushed to us (a torrent finished, a peer was banned, a tracker was
+/// announced to, ...). `data` is the daemon's own JSON for the event, passed through as is.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct NodeAlert {
+    pub node: String,
+    pub event_type: String,
+    pub info_hash: Option<String>,
+    pub timestamp_ms: i64,
+    pub data: serde_json::Value,
 }
 
 /// A single tracker host's live circuit breaker status, as reported by a node's own

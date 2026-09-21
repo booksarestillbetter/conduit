@@ -315,6 +315,7 @@ pub async fn plex_inbound(
     )
 )]
 pub async fn list_plex_scrobbles(
+    _auth: crate::auth::RequireAuth,
     State(db): State<Database>,
     Query(params): Query<ListScrobblesParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -662,6 +663,7 @@ pub async fn ombi_inbound(
     )
 )]
 pub async fn list_ombi_requests(
+    _auth: crate::auth::RequireAuth,
     State(db): State<Database>,
     Query(params): Query<ListOmbiParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {

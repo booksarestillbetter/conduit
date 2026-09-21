@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[utoipa::path(
@@ -26,6 +27,24 @@ pub async fn list_nodes(
 ) -> Json<Vec<NodeStats>> {
     let stats = pool.get_aggregate_stats();
     Json(stats.nodes)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/nodes/capabilities",
+    tag = "Nodes",
+    summary = "What each node's backend can do",
+    description = "For every node, whether its daemon supports queue reordering, sequential download, re-announce, tracker replacement, blocklist update, path rename, port test and alternate speed limits. A client should hide or disable an action the node cannot perform; calling it anyway returns 501.",
+    responses(
+        (status = 200, description = "Capabilities keyed by node name", body = std::collections::HashMap<String, fetcher_core::NodeCapabilities>),
+        (status = 401, description = "Unauthorized")
+    )
+)]
+pub async fn get_node_capabilities(
+    _auth: RequireAuth,
+    State(pool): State<Arc<FetcherPool>>,
+) -> Json<HashMap<String, fetcher_core::NodeCapabilities>> {
+    Json(pool.all_node_capabilities())
 }
 
 #[utoipa::path(
@@ -62,7 +81,7 @@ pub async fn get_node_session(
     path = "/api/nodes/{name}/session",
     tag = "Nodes",
     summary = "Update fetcher daemon session settings",
-    description = "Applies configuration changes directly to the remote fetcher daemon (Transmission, qBittorrent, or Deluge — not supported on Synapse) via RPC.",
+    description = "Applies configuration changes directly to the remote fetcher daemon (Transmission, qBittorrent, Deluge or Synapse) via RPC. Only keys the daemon has are applied; Synapse also accepts `synapse-dht-read-only`, `synapse-zeroconf` and `synapse-announce-ip`.",
     params(
         ("name" = String, Path, description = "Configured node name")
     ),
@@ -100,6 +119,7 @@ pub async fn update_node_session(
     responses(
         (status = 200, description = "Port test result"),
         (status = 404, description = "Node not found"),
+        (status = 501, description = "This node's backend cannot test its port"),
         (status = 401, description = "Unauthorized")
     )
 )]
@@ -111,8 +131,7 @@ pub async fn test_node_port(
     let client = pool.get_client(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "Node not found"}))))?;
 
-    let is_open = client.test_port().await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let is_open = client.test_port().await.map_err(|e| crate::api::op_error::op_failure(&e))?;
 
     Ok(Json(json!({"port_is_open": is_open})))
 }
@@ -133,7 +152,8 @@ pub struct TurtleModePayload {
     request_body = TurtleModePayload,
     responses(
         (status = 200, description = "Turtle mode updated"),
-        (status = 404, description = "Node not found")
+        (status = 404, description = "Node not found"),
+        (status = 501, description = "This node's backend has no alternate speed limits")
     )
 )]
 pub async fn set_turtle_mode(
@@ -145,8 +165,7 @@ pub async fn set_turtle_mode(
     let client = pool.get_client(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "Node not found"}))))?;
 
-    client.set_turtle_mode(payload.enabled).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    client.set_turtle_mode(payload.enabled).await.map_err(|e| crate::api::op_error::op_failure(&e))?;
 
     Ok(Json(json!({
         "node": name,
@@ -193,7 +212,8 @@ pub async fn set_turtle_mode_all(
     ),
     responses(
         (status = 200, description = "Blocklist updated with rule count"),
-        (status = 404, description = "Node not found")
+        (status = 404, description = "Node not found"),
+        (status = 501, description = "This node's backend has no blocklist to update")
     )
 )]
 pub async fn update_node_blocklist(
@@ -204,8 +224,7 @@ pub async fn update_node_blocklist(
     let client = pool.get_client(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "Node not found"}))))?;
 
-    let count = client.update_blocklist().await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let count = client.update_blocklist().await.map_err(|e| crate::api::op_error::op_failure(&e))?;
 
     Ok(Json(json!({
         "node": name,

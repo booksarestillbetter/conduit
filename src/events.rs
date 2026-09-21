@@ -25,6 +25,10 @@ pub const TOPIC_EVENTS: &str = "events";
 pub const TOPIC_PIPELINE: &str = "pipeline";
 pub const TOPIC_ARR_STATS: &str = "arr_stats";
 pub const TOPIC_PLATFORM_HEALTH: &str = "platform_health";
+/// Live alerts pushed by nodes whose daemon streams them (Synapse): torrent finished, peer
+/// banned, tracker announced, ... Payload is a `fetcher_core::NodeAlert`. Subscribe-gated like
+/// every topic except telemetry.
+pub const TOPIC_NODE_ALERTS: &str = "node_alerts";
 /// The always-on cluster telemetry snapshot (aggregate stats + enriched torrent list),
 /// published once per tick by `engines::telemetry::run_telemetry_publisher` and forwarded
 /// unconditionally (not gated by a client's `subscribed_topics`) to every WebSocket connection

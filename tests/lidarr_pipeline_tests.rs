@@ -41,6 +41,7 @@ async fn test_lidarr_webhook_lifecycle_and_classifier_routing() {
     let fetcher_pool = Arc::new(FetcherPool::new());
     let notifiers = Arc::new(NotificationManager);
 
+    let jwt_secret = config_mgr.get().await.system.jwt_secret.clone();
     let state = AppState {
         config: config_mgr,
         db: db.clone(),
@@ -56,6 +57,8 @@ async fn test_lidarr_webhook_lifecycle_and_classifier_routing() {
     };
 
     let router = build_api_router(state);
+    let admin = db.create_user("admin", &conduit::auth::hash_password("AdminPass123").unwrap(), true).unwrap();
+    let admin_token = conduit::auth::create_jwt(&admin.id, &admin.username, true, admin.token_version, &jwt_secret, 7).unwrap();
 
     // 1. Ingest Lidarr Grab Webhook
     let grab_payload = serde_json::json!({
@@ -128,6 +131,7 @@ async fn test_lidarr_webhook_lifecycle_and_classifier_routing() {
     let req = Request::builder()
         .method("POST")
         .uri("/api/sync/classify")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .header("Content-Type", "application/json")
         .body(Body::from(serde_json::to_vec(&classify_payload).unwrap()))
         .unwrap();
@@ -194,6 +198,7 @@ async fn test_cross_app_and_tracker_assisted_music_classification() {
     let fetcher_pool = Arc::new(FetcherPool::new());
     let notifiers = Arc::new(NotificationManager);
 
+    let jwt_secret = config_mgr.get().await.system.jwt_secret.clone();
     let state = AppState {
         config: config_mgr,
         db: db.clone(),
@@ -209,6 +214,8 @@ async fn test_cross_app_and_tracker_assisted_music_classification() {
     };
 
     let router = build_api_router(state);
+    let admin = db.create_user("admin", &conduit::auth::hash_password("AdminPass123").unwrap(), true).unwrap();
+    let admin_token = conduit::auth::create_jwt(&admin.id, &admin.username, true, admin.token_version, &jwt_secret, 7).unwrap();
 
     // Send a music release payload with indexer RED and [V0] to the /api/sonarr/inbound endpoint
     let sonarr_misrouted_payload = serde_json::json!({
@@ -254,6 +261,7 @@ async fn test_cross_app_and_tracker_assisted_music_classification() {
     let req = Request::builder()
         .method("POST")
         .uri("/api/sync/classify")
+        .header("Authorization", format!("Bearer {admin_token}"))
         .header("Content-Type", "application/json")
         .body(Body::from(serde_json::to_vec(&classify_payload).unwrap()))
         .unwrap();

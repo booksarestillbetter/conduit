@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use crate::config::{FetcherNodeConfig, RetrieverClientType};
-use crate::models::{NativeCircuitBreakerStatus, NodeCapabilities, Torrent};
+use crate::models::{NativeCircuitBreakerStatus, NodeAlert, NodeCapabilities, Torrent};
 
 #[async_trait]
 pub trait TorrentClientTrait: Send + Sync {
@@ -12,7 +12,13 @@ pub trait TorrentClientTrait: Send + Sync {
     /// built-in tracker circuit breaker). Default: none — only backends that can actually
     /// support a given feature need to override this.
     async fn get_capabilities(&self) -> anyhow::Result<NodeCapabilities> {
-        Ok(NodeCapabilities::default())
+        Ok(NodeCapabilities::baseline(self.client_type()))
+    }
+
+    /// A feed of live events from this node, for backends whose daemon pushes them (Synapse).
+    /// Default: none, and the node is only observed by polling.
+    fn subscribe_alerts(&self) -> Option<tokio::sync::broadcast::Receiver<NodeAlert>> {
+        None
     }
 
     /// Lists this node's own native tracker circuit breaker status, for backends where

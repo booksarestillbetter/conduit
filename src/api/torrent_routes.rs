@@ -1,4 +1,5 @@
 // src/api/torrent_routes.rs
+use crate::api::op_error::{is_unsupported, op_failure, status_only, ApiError};
 use crate::auth::RequireAuth;
 use crate::db::Database;
 use crate::fetcher::{
@@ -14,7 +15,7 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use utoipa::{IntoParams, ToSchema};
@@ -2018,7 +2019,8 @@ pub struct QueueMovePayload {
     request_body = QueueMovePayload,
     responses(
         (status = 200, description = "Queue position moved"),
-        (status = 404, description = "Torrent not found")
+        (status = 404, description = "Torrent not found"),
+        (status = 501, description = "This node's backend cannot reorder its queue")
     )
 )]
 pub async fn queue_move_torrent(
@@ -2026,12 +2028,12 @@ pub async fn queue_move_torrent(
     State(pool): State<Arc<FetcherPool>>,
     Path(compound_id): Path<String>,
     Json(payload): Json<QueueMovePayload>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let (node, id_str) = compound_id.split_once(':').ok_or(StatusCode::BAD_REQUEST)?;
-    let id: i64 = id_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (node, id_str) = compound_id.split_once(':').ok_or_else(|| status_only(StatusCode::BAD_REQUEST))?;
+    let id: i64 = id_str.parse().map_err(|_| status_only(StatusCode::BAD_REQUEST))?;
 
-    let client = pool.get_client(node).ok_or(StatusCode::NOT_FOUND)?;
-    client.queue_move(&[id], &payload.direction).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let client = pool.get_client(node).ok_or_else(|| status_only(StatusCode::NOT_FOUND))?;
+    client.queue_move(&[id], &payload.direction).await.map_err(|e| op_failure(&e))?;
 
     Ok(Json(json!({
         "compound_id": compound_id,
@@ -2054,14 +2056,15 @@ pub struct BulkQueueMovePayload {
     summary = "Bulk move torrent queue positions",
     request_body = BulkQueueMovePayload,
     responses(
-        (status = 200, description = "Bulk queue movement executed")
+        (status = 200, description = "Bulk queue movement executed"),
+        (status = 501, description = "None of the selected nodes' backends can reorder their queue")
     )
 )]
 pub async fn queue_move_bulk(
     _auth: RequireAuth,
     State(pool): State<Arc<FetcherPool>>,
     Json(payload): Json<BulkQueueMovePayload>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let mut node_groups: HashMap<String, Vec<i64>> = HashMap::new();
     for cid in &payload.compound_ids {
         if let Some((node, id_str)) = cid.split_once(':') {
@@ -2072,18 +2075,36 @@ pub async fn queue_move_bulk(
     }
 
     let mut moved_count = 0usize;
+    let mut unsupported_nodes: Vec<String> = Vec::new();
+    let mut failed_nodes: Vec<Value> = Vec::new();
     for (node, ids) in node_groups {
         if let Some(client) = pool.get_client(&node) {
-            if client.queue_move(&ids, &payload.direction).await.is_ok() {
-                moved_count += ids.len();
+            match client.queue_move(&ids, &payload.direction).await {
+                Ok(()) => moved_count += ids.len(),
+                Err(e) if is_unsupported(&e) => unsupported_nodes.push(node),
+                Err(e) => failed_nodes.push(json!({ "node": node, "error": e.to_string() })),
             }
         }
+    }
+
+    // Nothing moved only because no selected node can: say so rather than report success.
+    if moved_count == 0 && failed_nodes.is_empty() && !unsupported_nodes.is_empty() {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "error": "None of the selected nodes' backends can reorder their queue",
+                "unsupported": true,
+                "unsupported_nodes": unsupported_nodes,
+            })),
+        ));
     }
 
     Ok(Json(json!({
         "moved_torrents": moved_count,
         "direction": payload.direction,
-        "status": "success"
+        "unsupported_nodes": unsupported_nodes,
+        "failed_nodes": failed_nodes,
+        "status": if failed_nodes.is_empty() && unsupported_nodes.is_empty() { "success" } else { "partial" }
     })))
 }
 
@@ -2103,7 +2124,8 @@ pub struct SequentialDownloadPayload {
     request_body = SequentialDownloadPayload,
     responses(
         (status = 200, description = "Sequential download state updated"),
-        (status = 404, description = "Torrent not found")
+        (status = 404, description = "Torrent not found"),
+        (status = 501, description = "This node's backend has no sequential download")
     )
 )]
 pub async fn set_sequential_download(
@@ -2111,12 +2133,12 @@ pub async fn set_sequential_download(
     State(pool): State<Arc<FetcherPool>>,
     Path(compound_id): Path<String>,
     Json(payload): Json<SequentialDownloadPayload>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let (node, id_str) = compound_id.split_once(':').ok_or(StatusCode::BAD_REQUEST)?;
-    let id: i64 = id_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (node, id_str) = compound_id.split_once(':').ok_or_else(|| status_only(StatusCode::BAD_REQUEST))?;
+    let id: i64 = id_str.parse().map_err(|_| status_only(StatusCode::BAD_REQUEST))?;
 
-    let client = pool.get_client(node).ok_or(StatusCode::NOT_FOUND)?;
-    client.set_sequential_download(&[id], payload.enabled).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let client = pool.get_client(node).ok_or_else(|| status_only(StatusCode::NOT_FOUND))?;
+    client.set_sequential_download(&[id], payload.enabled).await.map_err(|e| op_failure(&e))?;
 
     Ok(Json(json!({
         "compound_id": compound_id,
@@ -2142,7 +2164,8 @@ pub struct RenamePathPayload {
     request_body = RenamePathPayload,
     responses(
         (status = 200, description = "Path renamed successfully"),
-        (status = 404, description = "Torrent not found")
+        (status = 404, description = "Torrent not found"),
+        (status = 501, description = "This node's backend cannot rename paths")
     )
 )]
 pub async fn rename_torrent_path(
@@ -2150,13 +2173,13 @@ pub async fn rename_torrent_path(
     State(pool): State<Arc<FetcherPool>>,
     Path(compound_id): Path<String>,
     Json(payload): Json<RenamePathPayload>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let (node, id_str) = compound_id.split_once(':').ok_or(StatusCode::BAD_REQUEST)?;
-    let id: i64 = id_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (node, id_str) = compound_id.split_once(':').ok_or_else(|| status_only(StatusCode::BAD_REQUEST))?;
+    let id: i64 = id_str.parse().map_err(|_| status_only(StatusCode::BAD_REQUEST))?;
 
-    let client = pool.get_client(node).ok_or(StatusCode::NOT_FOUND)?;
+    let client = pool.get_client(node).ok_or_else(|| status_only(StatusCode::NOT_FOUND))?;
     let res = client.rename_path(id, &payload.path, &payload.new_name).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| op_failure(&e))?;
 
     Ok(Json(json!({
         "compound_id": compound_id,
@@ -2181,14 +2204,15 @@ pub struct BatchReplaceTrackersPayload {
     summary = "Search and replace tracker announce URLs across torrents",
     request_body = BatchReplaceTrackersPayload,
     responses(
-        (status = 200, description = "Replacement summary")
+        (status = 200, description = "Replacement summary"),
+        (status = 501, description = "The matching torrents' backends cannot change trackers")
     )
 )]
 pub async fn batch_replace_trackers(
     _auth: RequireAuth,
     State(pool): State<Arc<FetcherPool>>,
     Json(payload): Json<BatchReplaceTrackersPayload>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let all_torrents = pool.get_torrents(payload.node.as_deref(), None, None);
     let target_cids = payload.compound_ids.as_ref();
 
@@ -2196,6 +2220,8 @@ pub async fn batch_replace_trackers(
     let new_val = payload.new_url.trim();
 
     let mut replaced_torrents = 0usize;
+    let mut unsupported_nodes: Vec<String> = Vec::new();
+    let mut failed = 0usize;
 
     for t in all_torrents {
         if let Some(cids) = target_cids {
@@ -2203,12 +2229,26 @@ pub async fn batch_replace_trackers(
                 continue;
             }
         }
+        if unsupported_nodes.contains(&t.node) {
+            continue;
+        }
+
+        // Some backends (Synapse) leave a torrent's trackers out of the list view; ask for
+        // them so the torrent can still be matched.
+        let mut tracker_stats = t.tracker_stats.clone();
+        if tracker_stats.is_empty() {
+            if let Some(client) = pool.get_client(&t.node) {
+                if let Ok(detail) = client.get_torrent_details(t.id).await {
+                    tracker_stats = detail.tracker_stats;
+                }
+            }
+        }
 
         // Check if any tracker matches old_url
         let mut matched = false;
         let mut new_tracker_lines: Vec<String> = Vec::new();
 
-        for ts in &t.tracker_stats {
+        for ts in &tracker_stats {
             let announce = &ts.announce;
             if announce.to_lowercase().contains(&old_lower) {
                 matched = true;
@@ -2222,16 +2262,31 @@ pub async fn batch_replace_trackers(
         if matched {
             if let Some(client) = pool.get_client(&t.node) {
                 let tracker_list = new_tracker_lines.join("\n\n");
-                if client.replace_trackers(t.id, &tracker_list, &payload.old_url, new_val).await.is_ok() {
-                    replaced_torrents += 1;
+                match client.replace_trackers(t.id, &tracker_list, &payload.old_url, new_val).await {
+                    Ok(()) => replaced_torrents += 1,
+                    Err(e) if is_unsupported(&e) => unsupported_nodes.push(t.node.clone()),
+                    Err(_) => failed += 1,
                 }
             }
         }
     }
 
+    if replaced_torrents == 0 && failed == 0 && !unsupported_nodes.is_empty() {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "error": "The matching torrents are on nodes whose backend cannot change trackers",
+                "unsupported": true,
+                "unsupported_nodes": unsupported_nodes,
+            })),
+        ));
+    }
+
     Ok(Json(json!({
-        "status": "success",
+        "status": if failed == 0 && unsupported_nodes.is_empty() { "success" } else { "partial" },
         "replaced_torrents": replaced_torrents,
+        "failed_torrents": failed,
+        "unsupported_nodes": unsupported_nodes,
         "old_url": payload.old_url,
         "new_url": payload.new_url
     })))
