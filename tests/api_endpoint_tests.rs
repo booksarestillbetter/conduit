@@ -858,3 +858,52 @@ async fn what_a_backend_cannot_do_is_a_501_with_the_reason_and_the_ui_can_see_it
     let resp = send_request(&ctx.router, Method::POST, "/api/nodes/test_node/test-port", Some(&ctx.admin_token), None).await;
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+#[tokio::test]
+async fn universal_search_finds_active_torrents_and_requires_a_token() {
+    let ctx = setup_test_context().await;
+
+    let anon = send_request(&ctx.router, Method::GET, "/api/search?q=Test.Release", None, None).await;
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = send_request(&ctx.router, Method::GET, "/api/search?q=Test.Release", Some(&ctx.admin_token), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let torrents = body["torrents"].as_array().unwrap();
+    assert!(
+        torrents.iter().any(|t| t["name"] == "Test.Release.2026.1080p.WEB-DL"),
+        "the seeded active torrent should be found: {body}"
+    );
+    // History sections are present (even if empty) rather than missing keys.
+    assert!(body["history"]["grabs"].is_array());
+    assert!(body["sonarr"].is_array());
+    assert!(body["radarr"].is_array());
+
+    // An empty/blank query is answered, not an error, and finds nothing.
+    let resp = send_request(&ctx.router, Method::GET, "/api/search?q=", Some(&ctx.admin_token), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["torrents"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn purge_history_now_requires_a_configured_retention_period() {
+    let ctx = setup_test_context().await;
+
+    // Not configured yet: a clear 400, not a purge of nothing silently reported as success.
+    let resp = send_request(&ctx.router, Method::POST, "/api/settings/purge-history", Some(&ctx.admin_token), None).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let mut config = ctx.config_mgr.get().await;
+    config.system.history_retention_days = Some(30);
+    ctx.config_mgr.update(config).await.unwrap();
+
+    let resp = send_request(&ctx.router, Method::POST, "/api/settings/purge-history", Some(&ctx.admin_token), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["event_logs"], 0, "nothing is old enough to purge yet: {body}");
+
+    // Not an admin route by accident.
+    let anon = send_request(&ctx.router, Method::POST, "/api/settings/purge-history", None, None).await;
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+}

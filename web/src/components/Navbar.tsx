@@ -21,6 +21,7 @@ interface NavbarProps {
   user: UserRecord | null;
   onLogout: () => void;
   onOpenAddModal: () => void;
+  onOpenUniversalSearch: () => void;
   onOpenProfile: () => void;
   onNavigateHome: () => void;
   onNavigateToLogs?: () => void;
@@ -44,6 +45,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   user,
   onLogout,
   onOpenAddModal,
+  onOpenUniversalSearch,
   onOpenProfile,
   onNavigateHome,
   onNavigateToLogs,
@@ -104,6 +106,18 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className="font-semibold">{formatSpeed(stats?.total_upload_speed || 0)}</span>
           </div>
         </div>
+
+        {/* Universal Search — fetchers, Sonarr/Radarr and history at once; the box below only
+            filters the current page's torrent list. */}
+        <button
+          onClick={onOpenUniversalSearch}
+          title="Search everything: fetchers, Sonarr, Radarr, and history (Ctrl/Cmd+K)"
+          className="hidden md:flex items-center space-x-2 rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-semibold text-slate-400 hover:text-slate-200 hover:border-slate-600 transition-colors cursor-pointer"
+        >
+          <Search className="h-3.5 w-3.5" />
+          <span>Search everything</span>
+          <kbd className="rounded border border-slate-700 bg-slate-900 px-1 py-0.5 font-mono text-[10px] text-slate-500">⌘K</kbd>
+        </button>
 
         {/* Search Bar */}
         <div className="relative w-64">

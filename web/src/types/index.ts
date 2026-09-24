@@ -540,6 +540,10 @@ export interface AppConfig {
     request_portal_label?: string;
     media_portal_url?: string;
     media_portal_label?: string;
+    /** Keep event logs, Plex watch history, Ombi requests and grab lineage history for this
+     * many days; older rows are purged. Unset (the default) keeps everything forever. Never
+     * applies to `arr_grabs` (the Ghost Archive) itself. */
+    history_retention_days?: number;
   };
   nodes: Record<string, TransmissionNodeConfig>;
   sonarr: {
@@ -781,3 +785,43 @@ export interface OmbiRequestRecord {
   updated_at: string;
 }
 
+
+// --- Universal Search ---
+
+/** A Sonarr/Radarr catalog lookup match — the same call their own "Add Series"/"Add Movie"
+ * search box makes, so `in_library` and `library_id` come straight from that instance. */
+export interface ArrLookupResult {
+  source: 'sonarr' | 'radarr';
+  node_name: string;
+  in_library: boolean;
+  library_id?: number;
+  title: string;
+  year?: number;
+  overview?: string;
+  poster_url?: string;
+  tvdb_id?: number;
+  tmdb_id?: number;
+  imdb_id?: string;
+  status?: string;
+  /** Sonarr only. */
+  network?: string;
+  /** Deep link into that Sonarr/Radarr's own web UI — the library item's page when
+   * `in_library`, otherwise its "add new" search prefilled with this title. */
+  open_url: string;
+}
+
+export interface UniversalSearchHistory {
+  grabs: ArrGrabRecord[];
+  scrobbles: PlexScrobbleRecord[];
+  ombi_requests: OmbiRequestRecord[];
+}
+
+export interface UniversalSearchResponse {
+  query: string;
+  torrents: UnifiedTorrent[];
+  history: UniversalSearchHistory;
+  sonarr: ArrLookupResult[];
+  radarr: ArrLookupResult[];
+  /** Non-fatal per-source failures (e.g. a Sonarr instance timed out). */
+  warnings: string[];
+}

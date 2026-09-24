@@ -35,6 +35,7 @@ import {
   Lock,
   Boxes,
   Globe,
+  Clock,
 } from 'lucide-react';
 import {
   fetchSettings,
@@ -65,6 +66,8 @@ import {
   fetchOmbiRequests,
   sendPlexWebhookTest,
   sendOmbiWebhookTest,
+  purgeHistoryNow,
+  RetentionPurgeSummary,
 } from '../services/api';
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities';
 import { useServerVersion } from '../hooks/useServerVersion';
@@ -177,6 +180,8 @@ export const Settings: React.FC = () => {
   const [savingSession, setSavingSession] = useState(false);
   const [testingPort, setTestingPort] = useState(false);
   const [portStatus, setPortStatus] = useState<boolean | null>(null);
+  const [purging, setPurging] = useState(false);
+  const [lastPurge, setLastPurge] = useState<RetentionPurgeSummary | null>(null);
 
   // Token creation
   const [newTokenName, setNewTokenName] = useState('');
@@ -4647,6 +4652,65 @@ export const Settings: React.FC = () => {
                 Loads roughly 50-60MB of IP range data into memory once enabled and Conduit is restarted or the weekly refresh runs. Disable this if memory footprint matters more than peer geolocation on your setup.
               </div>
             )}
+          </div>
+
+          {/* Data Retention */}
+          <div className="border-t border-slate-800 pt-6 space-y-4">
+            <div className="space-y-0.5">
+              <h3 className="text-sm font-bold text-slate-200 flex items-center space-x-2">
+                <Clock className="h-4 w-4 text-sky-400" />
+                <span>Data Retention</span>
+              </h3>
+              <p className="text-xs text-slate-400 max-w-xl">
+                Automatically deletes old rows from event logs, Plex watch history, Ombi requests, and per-item grab lineage once they're older than this. Never touches the Ghost Archive itself — that stays forever, since it's your current library state, not a log. Leave blank to keep everything indefinitely (the default).
+              </p>
+            </div>
+            <div className="flex items-end space-x-3">
+              <div className="w-48">
+                <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Keep History For (Days)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={config.system.history_retention_days ?? ''}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    const days = raw === '' ? undefined : Math.max(0, Number(raw));
+                    setConfig({ ...config, system: { ...config.system, history_retention_days: days } });
+                  }}
+                  placeholder="Forever"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 py-2 px-3 text-sm text-slate-200 focus:border-brand-500 focus:outline-none"
+                />
+              </div>
+              <button
+                type="button"
+                disabled={purging || !config.system.history_retention_days}
+                title={config.system.history_retention_days ? undefined : 'Set and save a retention period first'}
+                onClick={async () => {
+                  setPurging(true);
+                  try {
+                    const summary = await purgeHistoryNow();
+                    setLastPurge(summary);
+                  } catch (err: any) {
+                    alert(`Purge failed: ${err.message}`);
+                  } finally {
+                    setPurging(false);
+                  }
+                }}
+                className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-700 hover:text-rose-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {purging ? 'Purging…' : 'Purge Now'}
+              </button>
+            </div>
+            {lastPurge && (
+              <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-400">
+                Purged {lastPurge.event_logs + lastPurge.plex_scrobbles + lastPurge.ombi_requests + lastPurge.arr_grab_history} row(s):{' '}
+                {lastPurge.event_logs} event log(s), {lastPurge.plex_scrobbles} Plex scrobble(s), {lastPurge.ombi_requests} Ombi request(s),{' '}
+                {lastPurge.arr_grab_history} grab history row(s).
+              </div>
+            )}
+            <p className="text-[10px] text-slate-500">
+              The retention period above also runs automatically about once an hour once it's set and saved — "Purge Now" just runs it immediately instead of waiting.
+            </p>
           </div>
 
         </div>

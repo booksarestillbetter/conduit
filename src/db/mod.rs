@@ -152,6 +152,22 @@ pub struct EventLogRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// How many rows a data-retention pass (or a manual "purge now") removed from each historical
+/// table — see `Database::purge_history_older_than`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, ToSchema)]
+pub struct RetentionPurgeSummary {
+    pub event_logs: usize,
+    pub plex_scrobbles: usize,
+    pub ombi_requests: usize,
+    pub arr_grab_history: usize,
+}
+
+impl RetentionPurgeSummary {
+    pub fn total(&self) -> usize {
+        self.event_logs + self.plex_scrobbles + self.ombi_requests + self.arr_grab_history
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PlexScrobbleRecord {
     pub id: String,
@@ -1640,6 +1656,28 @@ impl Database {
         Ok(list)
     }
 
+    // --- Data Retention ---
+    /// Deletes rows older than `cutoff` from the append-only historical tables: event logs,
+    /// Plex scrobbles, Ombi requests, and per-item grab lineage (`arr_grab_history`).
+    /// Deliberately does not touch `arr_grabs` itself — that table is collapsed to one
+    /// current-state row per item (the Ghost Archive), which can still describe an
+    /// in-progress download, so age-based deletion there could remove something still
+    /// active rather than only history.
+    pub fn purge_history_older_than(&self, cutoff: DateTime<Utc>) -> anyhow::Result<RetentionPurgeSummary> {
+        let conn = self.conn.lock();
+        let cutoff_str = cutoff.to_rfc3339();
+        let event_logs = conn.execute("DELETE FROM event_logs WHERE created_at < ?1", params![cutoff_str])?;
+        let plex_scrobbles = conn.execute("DELETE FROM plex_scrobbles WHERE created_at < ?1", params![cutoff_str])?;
+        let ombi_requests = conn.execute("DELETE FROM ombi_requests WHERE created_at < ?1", params![cutoff_str])?;
+        let arr_grab_history = conn.execute("DELETE FROM arr_grab_history WHERE created_at < ?1", params![cutoff_str])?;
+        Ok(RetentionPurgeSummary {
+            event_logs,
+            plex_scrobbles,
+            ombi_requests,
+            arr_grab_history,
+        })
+    }
+
     // --- Event Logs ---
     pub fn log_event(&self, event_type: &str, level: &str, message: &str, details_json: Option<&str>) -> anyhow::Result<()> {
         let created_at = Utc::now();
@@ -1962,6 +2000,28 @@ impl Database {
         })
     }
 
+    /// Watch-history rows whose title matches `q`, newest first — the "Plex history" section
+    /// of the universal search (`api::search_routes`).
+    pub fn search_plex_scrobbles(&self, q: &str, limit: usize) -> anyhow::Result<Vec<PlexScrobbleRecord>> {
+        let conn = self.conn.lock();
+        let pattern = format!("%{}%", q.trim());
+        let mut stmt = conn.prepare(
+            "SELECT id, event, user_name, media_type, title, series_title,
+                    season_number, episode_number, year, imdb_id, tmdb_id, tvdb_id,
+                    rating_key, duration_ms, view_offset_ms, trakt_synced, raw_json, created_at,
+                    source_node_name
+             FROM plex_scrobbles
+             WHERE title LIKE ?1 OR series_title LIKE ?1
+             ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![pattern, limit as i64], Self::map_plex_scrobble_row)?;
+        let mut items = Vec::new();
+        for r in rows {
+            items.push(r?);
+        }
+        Ok(items)
+    }
+
     /// Unsynced scrobbles originating from a `sync_watch_status=true` Plex node, oldest first —
     /// the actual eligible set for `engines::watch_sync`'s push-to-Trakt pass. Scrobbles from
     /// non-participating (or unmatched-origin) servers are excluded here but still visible via
@@ -2209,41 +2269,79 @@ impl Database {
         query_params.push((offset as i64).into());
 
         let mut stmt = conn.prepare(&query)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(query_params.iter()), |row| {
-            let created_str: String = row.get(13)?;
-            let created_at = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-
-            let updated_str: String = row.get(14)?;
-            let updated_at = DateTime::parse_from_rfc3339(&updated_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-
-            Ok(OmbiRequestRecord {
-                id: row.get(0)?,
-                event_type: row.get(1)?,
-                requested_by: row.get(2)?,
-                media_type: row.get(3)?,
-                title: row.get(4)?,
-                year: row.get(5)?,
-                overview: row.get(6)?,
-                poster_url: row.get(7)?,
-                imdb_id: row.get(8)?,
-                tmdb_id: row.get(9)?,
-                tvdb_id: row.get(10)?,
-                status: row.get(11)?,
-                raw_json: row.get(12)?,
-                created_at,
-                updated_at,
-                mattermost_post_id: row.get(15)?,
-            })
-        })?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(query_params.iter()), Self::map_ombi_request_row)?;
 
         let mut items = Vec::new();
         for r in rows {
             items.push(r?);
         }
         Ok((items, total))
+    }
+
+    fn map_ombi_request_row(row: &rusqlite::Row) -> rusqlite::Result<OmbiRequestRecord> {
+        let created_str: String = row.get(13)?;
+        let created_at = DateTime::parse_from_rfc3339(&created_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+
+        let updated_str: String = row.get(14)?;
+        let updated_at = DateTime::parse_from_rfc3339(&updated_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+
+        Ok(OmbiRequestRecord {
+            id: row.get(0)?,
+            event_type: row.get(1)?,
+            requested_by: row.get(2)?,
+            media_type: row.get(3)?,
+            title: row.get(4)?,
+            year: row.get(5)?,
+            overview: row.get(6)?,
+            poster_url: row.get(7)?,
+            imdb_id: row.get(8)?,
+            tmdb_id: row.get(9)?,
+            tvdb_id: row.get(10)?,
+            status: row.get(11)?,
+            raw_json: row.get(12)?,
+            created_at,
+            updated_at,
+            mattermost_post_id: row.get(15)?,
+        })
+    }
+
+    /// Requests whose title matches `q`, newest first — the "Ombi history" section of the
+    /// universal search (`api::search_routes`).
+    pub fn search_ombi_requests(&self, q: &str, limit: usize) -> anyhow::Result<Vec<OmbiRequestRecord>> {
+        let conn = self.conn.lock();
+        let pattern = format!("%{}%", q.trim());
+        let mut stmt = conn.prepare(
+            "SELECT id, event_type, requested_by, media_type, title, year,
+                    overview, poster_url, imdb_id, tmdb_id, tvdb_id, status,
+                    raw_json, created_at, updated_at, mattermost_post_id
+             FROM ombi_requests
+             WHERE title LIKE ?1
+             ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![pattern, limit as i64], Self::map_ombi_request_row)?;
+        let mut items = Vec::new();
+        for r in rows {
+            items.push(r?);
+        }
+        Ok(items)
+    }
+
+    /// Test-only: back-dates every row currently in one of the historical tables to `at`, so a
+    /// retention test can exercise the age cutoff without waiting real days. `table` is not a
+    /// bind parameter (SQLite can't parameterize identifiers) — restricted to this fixed
+    /// allowlist since callers are trusted in-tree test code, not user input.
+    #[cfg(test)]
+    pub fn test_backdate(&self, table: &str, at: DateTime<Utc>) -> anyhow::Result<()> {
+        let column = match table {
+            "event_logs" | "plex_scrobbles" | "ombi_requests" | "arr_grab_history" => "created_at",
+            other => anyhow::bail!("test_backdate: unexpected table '{other}'"),
+        };
+        let conn = self.conn.lock();
+        conn.execute(&format!("UPDATE {table} SET {column} = ?1"), params![at.to_rfc3339()])?;
+        Ok(())
     }
 }

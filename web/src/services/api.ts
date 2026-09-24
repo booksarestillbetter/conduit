@@ -9,6 +9,7 @@ import {
   DetailedTorrent,
   EventLogRecord,
   UnifiedTorrent,
+  UniversalSearchResponse,
   UserRecord,
 } from '../types';
 
@@ -968,3 +969,30 @@ export async function createMobilePairToken(): Promise<{
 
 
 
+
+// --- Universal Search & Data Retention ---
+
+export async function universalSearch(q: string, signal?: AbortSignal): Promise<UniversalSearchResponse> {
+  const res = await apiFetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}`, {
+    headers: getAuthHeaders(),
+    signal,
+  });
+  if (!res.ok) return failWith(res, 'Search failed');
+  return res.json();
+}
+
+export interface RetentionPurgeSummary {
+  event_logs: number;
+  plex_scrobbles: number;
+  ombi_requests: number;
+  arr_grab_history: number;
+}
+
+export async function purgeHistoryNow(): Promise<RetentionPurgeSummary> {
+  const res = await apiFetch(`${API_BASE}/api/settings/purge-history`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) return failWith(res, 'Failed to purge history');
+  return res.json();
+}

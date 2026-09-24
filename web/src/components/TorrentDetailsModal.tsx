@@ -1163,8 +1163,11 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compou
                           </span>
                         </div>
 
-                        {/* Visual Heatmap Grid */}
-                        <div className="grid grid-cols-20 sm:grid-cols-30 md:grid-cols-50 gap-1 max-h-72 overflow-y-auto p-1 bg-slate-900/80 rounded-lg border border-slate-800/80">
+                        {/* Visual Heatmap Grid — arbitrary-value column counts, since Tailwind's
+                            built-in grid-cols-* scale stops at 12 and grid-cols-20/30/50 silently
+                            generate no CSS (the grid then falls back to one implicit column, and
+                            every "tiny square" stretches into its own full-width row). */}
+                        <div className="grid grid-cols-[repeat(20,minmax(0,1fr))] sm:grid-cols-[repeat(30,minmax(0,1fr))] md:grid-cols-[repeat(50,minmax(0,1fr))] gap-1 max-h-72 overflow-y-auto p-1 bg-slate-900/80 rounded-lg border border-slate-800/80">
                           {blocks.map((b) => {
                             let bgColor = 'bg-slate-800/60';
                             if (b.dlPct >= 1) {
@@ -1180,7 +1183,7 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compou
                             return (
                               <div
                                 key={b.bIdx}
-                                className={`h-3.5 w-full rounded-xs transition-colors cursor-pointer hover:ring-2 hover:ring-white ${bgColor}`}
+                                className={`aspect-square w-full rounded-xs transition-colors cursor-pointer hover:ring-2 hover:ring-white ${bgColor}`}
                                 title={`Piece ${b.start}${b.end > b.start + 1 ? `-${b.end - 1}` : ''}: ${(b.dlPct * 100).toFixed(0)}% downloaded, Swarm Availability: ${b.avail.toFixed(1)}`}
                               />
                             );

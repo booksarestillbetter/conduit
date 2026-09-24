@@ -6,6 +6,7 @@ pub mod metrics_routes;
 pub mod node_routes;
 pub mod op_error;
 pub mod openapi;
+pub mod search_routes;
 pub mod plex_oauth_routes;
 pub mod settings_routes;
 pub mod sync_routes;
@@ -65,6 +66,9 @@ pub fn build_api_router(state: AppState) -> Router {
         .route("/api/torrents/{compound_id}/enrich", post(torrent_routes::enrich_torrent))
         .route("/api/torrents/enrich-all", post(torrent_routes::enrich_all_torrents))
 
+        // Universal Search (torrents + Sonarr/Radarr catalog lookup + history)
+        .route("/api/search", get(search_routes::universal_search))
+
         // Nodes & Fetcher Sessions
         .route("/api/nodes", get(node_routes::list_nodes))
         .route("/api/nodes/capabilities", get(node_routes::get_node_capabilities))
@@ -79,6 +83,7 @@ pub fn build_api_router(state: AppState) -> Router {
         .route("/api/settings/backup", post(settings_routes::export_backup))
         .route("/api/settings/restore", post(settings_routes::restore_backup))
         .route("/api/settings/rekey-db", post(settings_routes::rekey_database))
+        .route("/api/settings/purge-history", post(settings_routes::purge_history_now))
 
         // Arr Webhooks & Master-Slave Controls (with standard path aliases)
         .route("/api/sonarr/inbound", post(arr_routes::sonarr_inbound))

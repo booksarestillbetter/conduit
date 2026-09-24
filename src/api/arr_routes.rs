@@ -267,7 +267,7 @@ fn infer_indexer_source(payload_idx: Option<&str>, grab_idx: Option<&str>, relea
     "Indexer Feed".to_string()
 }
 
-fn extract_poster_url(obj: Option<&serde_json::Value>) -> Option<String> {
+pub(crate) fn extract_poster_url(obj: Option<&serde_json::Value>) -> Option<String> {
     let images = obj.and_then(|m| m.get("images")).and_then(|i| i.as_array())?;
     // First prioritize poster or cover
     if let Some(img) = images.iter().find(|img| {

@@ -10,6 +10,7 @@ pub mod node_alerts;
 pub mod pipeline;
 pub mod poller;
 pub mod registry;
+pub mod retention;
 pub mod space_manager;
 mod supervisor;
 pub mod telemetry;
@@ -149,6 +150,14 @@ pub fn start_all_engines(
         let (pool, event_bus, registry) = (pool.clone(), event_bus.clone(), registry.clone());
         spawn_supervised("node_alerts", registry.clone(), move || {
             node_alerts::run_node_alerts_loop(pool.clone(), event_bus.clone(), TaskHandle::new(registry.clone(), "node_alerts"))
+        });
+    }
+
+    // 15. Data Retention (opt-in; see config.system.history_retention_days)
+    {
+        let (config_mgr, db, registry) = (config_mgr.clone(), db.clone(), registry.clone());
+        spawn_supervised("retention", registry.clone(), move || {
+            retention::run_retention_loop(config_mgr.clone(), db.clone(), TaskHandle::new(registry.clone(), "retention"))
         });
     }
 }

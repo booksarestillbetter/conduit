@@ -11,6 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.17.0] - 2026-09-23
+
+### Added
+
+- **Universal search (Ctrl/Cmd+K).** Searches active/seeding torrents by name, Sonarr's and Radarr's own catalog lookup (the same call their "Add Series"/"Add Movie" search makes, so it also reports whether a title is already in the library), and historical Plex watch / Ombi request / Ghost Archive grab records, all from one command palette reachable from any page. A Sonarr/Radarr match links to that item in its own web UI (already in the library) or to its "add new" search prefilled with the title (not yet) — Conduit doesn't replicate the root-folder/quality-profile add flow, just gets you to it faster than opening Sonarr/Radarr yourself. Searches every configured Sonarr/Radarr instance, including per-zone ones. `GET /api/search`. Lidarr isn't wired in yet.
+- **Data retention.** Settings → System → "Keep History For (Days)" purges event logs, Plex watch history, Ombi requests, and per-item grab lineage older than the configured age, automatically about once an hour, or immediately via "Purge Now". Unset (the default) keeps everything forever. Never touches the Ghost Archive itself (`arr_grabs`) — that table holds current library state, including in-progress downloads, not pure history, so age-based deletion there could remove something still active.
+
+### Fixed
+
+- **Torrent details → Pieces: the heatmap rendered as long single-column rows, not a grid.** `grid-cols-20`/`sm:grid-cols-30`/`md:grid-cols-50` aren't real Tailwind classes (its default scale stops at 12), so they generated no CSS and every piece block stacked as its own full-width row. Switched to arbitrary-value grid classes that actually apply, and the blocks are now square (`aspect-square`) instead of a fixed thin height.
+
+---
+
 ## [0.16.2] - 2026-09-21
 
 ### Fixed

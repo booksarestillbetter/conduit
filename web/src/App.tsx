@@ -40,6 +40,7 @@ import {
   deleteTorrent,
 } from './services/api';
 import { TorrentDetailsModal } from './components/TorrentDetailsModal';
+import { UniversalSearch } from './components/UniversalSearch';
 import { ProfileModal } from './components/ProfileModal';
 import { ArchivedGrabsView } from './components/ArchivedGrabsView';
 import { useToast } from './context/ToastContext';
@@ -72,6 +73,7 @@ export const App: React.FC = () => {
   // Selection & Modals
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isUniversalSearchOpen, setIsUniversalSearchOpen] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [isBulkDeleteModalOpen, setIsBulkDeleteModalOpen] = useState(false);
   const [inspectCompoundId, setInspectCompoundId] = useState<string | null>(null);
@@ -148,6 +150,19 @@ export const App: React.FC = () => {
     window.addEventListener('conduit:session-expired', onSessionExpired);
     return () => window.removeEventListener('conduit:session-expired', onSessionExpired);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Universal search (Ctrl/Cmd+K) — global so it opens from any page, not just one with its
+  // own search box wired up.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsUniversalSearchOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
   const checkInitialState = async () => {
@@ -351,6 +366,7 @@ export const App: React.FC = () => {
         user={user}
         onLogout={handleLogout}
         onOpenAddModal={() => setIsAddModalOpen(true)}
+        onOpenUniversalSearch={() => setIsUniversalSearchOpen(true)}
         onOpenProfile={() => setIsProfileModalOpen(true)}
         onNavigateHome={() => navigate('/dashboard')}
         onNavigateToLogs={() => navigate('/logs')}
@@ -443,6 +459,13 @@ export const App: React.FC = () => {
       <TorrentDetailsModal
         compoundId={inspectCompoundId}
         onClose={() => setInspectCompoundId(null)}
+      />
+
+      <UniversalSearch
+        isOpen={isUniversalSearchOpen}
+        onClose={() => setIsUniversalSearchOpen(false)}
+        onOpenTorrent={handleViewTorrentDetails}
+        onNavigate={navigate}
       />
 
       <AddTorrentModal

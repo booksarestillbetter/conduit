@@ -137,3 +137,31 @@ pub async fn rekey_database(
 
     Ok(Json(json!({"message": "Database rekeyed successfully with new encryption key"})))
 }
+
+#[utoipa::path(
+    post,
+    path = "/api/settings/purge-history",
+    tag = "Settings",
+    summary = "Purge historical data older than the configured retention",
+    description = "Runs the data-retention purge immediately using `system.history_retention_days`, instead of waiting for the hourly engine cycle. Deletes from event logs, Plex watch history, Ombi requests and grab lineage history — never from the Ghost Archive (`arr_grabs`) itself, since that table holds current state, not pure history. Requires `history_retention_days` to be set to a positive number of days.",
+    responses(
+        (status = 200, description = "Rows purged, by table", body = crate::db::RetentionPurgeSummary),
+        (status = 400, description = "No retention period is configured"),
+        (status = 401, description = "Unauthorized")
+    )
+)]
+pub async fn purge_history_now(
+    _admin: RequireAdmin,
+    State(config_mgr): State<ConfigManager>,
+    State(db): State<Database>,
+) -> Result<Json<crate::db::RetentionPurgeSummary>, (StatusCode, Json<serde_json::Value>)> {
+    let config = config_mgr.get().await;
+    let days = config.system.history_retention_days.filter(|d| *d > 0).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Set \"Keep history for\" under Settings \u{2192} System before purging."})),
+        )
+    })?;
+
+    Ok(Json(crate::engines::retention::run_purge(&db, days)))
+}

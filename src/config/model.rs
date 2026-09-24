@@ -130,6 +130,13 @@ pub struct SystemConfig {
     /// Label shown for `media_portal_url`. Default: "Media Portal".
     #[serde(default = "default_media_portal_label")]
     pub media_portal_label: String,
+    /// Keep event logs, Plex watch history, Ombi requests and per-item grab lineage for this
+    /// many days; older rows are purged by `engines::retention`. `None` (the default) keeps
+    /// everything forever, so upgrading never starts deleting data nobody asked to lose.
+    /// Deliberately excludes `arr_grabs` itself (the Ghost Archive) — see
+    /// `Database::purge_history_older_than`.
+    #[serde(default)]
+    pub history_retention_days: Option<u32>,
 }
 
 fn default_bind_addr() -> String { "0.0.0.0".to_string() }
@@ -163,6 +170,7 @@ impl Default for SystemConfig {
             request_portal_label: default_request_portal_label(),
             media_portal_url: None,
             media_portal_label: default_media_portal_label(),
+            history_retention_days: None,
         }
     }
 }
