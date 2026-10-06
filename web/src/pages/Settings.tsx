@@ -685,6 +685,62 @@ export const Settings: React.FC = () => {
     );
   }
 
+  // Zone-scoped Sonarr/Radarr/Lidarr instances. An instance is either global (the Primary /
+  // replicas above) or belongs to exactly one zone; zone instances only receive that zone's
+  // `?zone=<id>` webhooks and grabs. Rendered inside each app's card on the Arr tab.
+  const renderZoneInstances = (app: 'sonarr' | 'radarr' | 'lidarr') => {
+    if (!config) return null;
+    const zones = config.zones || [];
+    const defaultVersion = app === 'sonarr' ? 3 : app === 'radarr' ? 4 : 1;
+    const free = zones.filter((z) => !z[app]);
+    const setZoneNode = (zoneId: string, node: ArrNodeConfig | undefined) => {
+      setConfig({ ...config, zones: zones.map((z) => (z.id === zoneId ? { ...z, [app]: node } : z)) });
+    };
+    const inputCls = 'w-full rounded-lg border border-slate-700 bg-slate-800 py-1.5 px-3 text-xs text-slate-200 focus:border-brand-500 focus:outline-none';
+    return (
+      <div className="rounded-xl border border-purple-500/20 bg-purple-500/5 p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-xs font-bold uppercase tracking-wider text-purple-300 capitalize">Zone-scoped {app} instances</span>
+            <p className="text-[11px] text-slate-400">The Primary above is global. Instances added here belong to a single zone and are used only for that zone's grabs and webhooks.</p>
+          </div>
+          <select
+            value=""
+            disabled={free.length === 0}
+            onChange={(e) => {
+              if (!e.target.value) return;
+              setZoneNode(e.target.value, { name: `${app}-${e.target.value}`, base_url: '', api_key: '', version: defaultVersion });
+            }}
+            className="rounded-lg bg-slate-800 border border-slate-700 px-2 py-1 text-xs font-semibold text-purple-400 focus:outline-none disabled:opacity-50"
+          >
+            <option value="">{zones.length === 0 ? 'Add a zone first' : free.length === 0 ? 'All zones have one' : '+ Add to zone…'}</option>
+            {free.map((z) => (
+              <option key={z.id} value={z.id}>{z.name}</option>
+            ))}
+          </select>
+        </div>
+        {zones.filter((z) => z[app]).map((z) => {
+          const node = z[app]!;
+          return (
+            <div key={z.id} className="space-y-2 rounded-lg border border-slate-800 bg-slate-800/40 p-3">
+              <div className="flex items-center justify-between">
+                <span className="rounded-full bg-purple-500/10 border border-purple-500/30 px-2 py-0.5 text-[10px] font-semibold text-purple-300">Zone: {z.name}</span>
+                <button type="button" onClick={() => setZoneNode(z.id, undefined)} className="text-rose-400 hover:text-rose-300" title="Remove from zone">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <input type="text" value={node.name} placeholder="Name" onChange={(e) => setZoneNode(z.id, { ...node, name: e.target.value })} className={inputCls} />
+                <input type="text" value={node.base_url} placeholder="Base URL" onChange={(e) => setZoneNode(z.id, { ...node, base_url: e.target.value })} className={inputCls} />
+                <input type="password" value={node.api_key} placeholder="API Key" onChange={(e) => setZoneNode(z.id, { ...node, api_key: e.target.value })} className={inputCls} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <div className="flex-1 overflow-auto p-8 space-y-6">
       <div className="flex items-center justify-between">
@@ -1293,6 +1349,8 @@ export const Settings: React.FC = () => {
               </div>
             </div>
 
+            {renderZoneInstances('sonarr')}
+
             {/* Collapsible Multi-Instance Replicas */}
             <div className="rounded-xl border border-slate-800/80 bg-slate-900/40 overflow-hidden">
               <button
@@ -1546,6 +1604,8 @@ export const Settings: React.FC = () => {
                 </div>
               </div>
             </div>
+
+            {renderZoneInstances('radarr')}
 
             {/* Collapsible Multi-Instance Replicas */}
             <div className="rounded-xl border border-slate-800/80 bg-slate-900/40 overflow-hidden">
@@ -1801,6 +1861,8 @@ export const Settings: React.FC = () => {
               </div>
             </div>
 
+            {renderZoneInstances('lidarr')}
+
             {/* Collapsible Multi-Instance Replicas */}
             <div className="rounded-xl border border-slate-800/80 bg-slate-900/40 overflow-hidden">
               <button
@@ -1928,7 +1990,7 @@ export const Settings: React.FC = () => {
       {tab === 'zones' && (
         <div className="space-y-6 max-w-5xl">
           <div className="rounded-xl border border-purple-500/20 bg-purple-500/10 p-4 text-xs text-purple-300 leading-relaxed">
-            <strong>Zones</strong> let you run fully independent stacks (e.g. a "General Library" and a "4K Library"), each with its own Sonarr/Radarr/Lidarr instance and a subset of your Plex servers and fetcher nodes. Point each zone's Sonarr/Radarr/Lidarr webhook at the zone-specific URL below — Conduit tags every grab with its zone, and the sidebar zone switcher filters the Dashboard, Pipeline, and Fetchers views. Leave this empty if you only run one stack; nothing here is required.
+            <strong>Zones</strong> let you run fully independent stacks (e.g. a "General Library" and a "4K Library"), each with its own Sonarr/Radarr/Lidarr instance (added from the Arr tab and scoped to a zone) and a subset of your Plex servers and fetcher nodes. Point each zone's Sonarr/Radarr/Lidarr webhook at the zone-specific URL below — Conduit tags every grab with its zone, and the sidebar zone switcher filters the Dashboard, Pipeline, and Fetchers views. Leave this empty if you only run one stack; nothing here is required.
           </div>
 
           <div className="flex items-center justify-between">
@@ -1970,11 +2032,6 @@ export const Settings: React.FC = () => {
               zones[zIdx] = { ...zones[zIdx], ...patch };
               setConfig({ ...config, zones });
             };
-            const updateZoneApp = (app: 'sonarr' | 'radarr' | 'lidarr', patch: Partial<ArrNodeConfig>) => {
-              const defaultVersion = app === 'sonarr' ? 3 : app === 'radarr' ? 4 : 1;
-              const current = zone[app] || { name: '', base_url: '', api_key: '', version: defaultVersion };
-              updateZone({ [app]: { ...current, ...patch } });
-            };
             const toggleZoneList = (field: 'plex_node_names' | 'fetcher_node_names', name: string) => {
               const list = zone[field] || [];
               const next = list.includes(name) ? list.filter((n) => n !== name) : [...list, name];
@@ -2009,32 +2066,22 @@ export const Settings: React.FC = () => {
                   </button>
                 </div>
 
-                {/* Per-zone Sonarr/Radarr/Lidarr */}
+                {/* Instances assigned to this zone (managed on the Arr tab) */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {(['sonarr', 'radarr', 'lidarr'] as const).map((app) => (
-                    <div key={app} className="space-y-2 rounded-xl border border-slate-800 bg-slate-800/40 p-3.5">
+                    <div key={app} className="space-y-1 rounded-xl border border-slate-800 bg-slate-800/40 p-3.5">
                       <span className="text-xs font-bold uppercase tracking-wider text-slate-400 capitalize">{app}</span>
-                      <input
-                        type="text"
-                        value={zone[app]?.name || ''}
-                        placeholder={`${app}-${zone.id}`}
-                        onChange={(e) => updateZoneApp(app, { name: e.target.value })}
-                        className="w-full rounded-lg border border-slate-700 bg-slate-800 py-1.5 px-3 text-xs text-slate-200 focus:border-brand-500 focus:outline-none"
-                      />
-                      <input
-                        type="text"
-                        value={zone[app]?.base_url || ''}
-                        placeholder="Base URL"
-                        onChange={(e) => updateZoneApp(app, { base_url: e.target.value })}
-                        className="w-full rounded-lg border border-slate-700 bg-slate-800 py-1.5 px-3 text-xs text-slate-200 focus:border-brand-500 focus:outline-none"
-                      />
-                      <input
-                        type="password"
-                        value={zone[app]?.api_key || ''}
-                        placeholder="API Key"
-                        onChange={(e) => updateZoneApp(app, { api_key: e.target.value })}
-                        className="w-full rounded-lg border border-slate-700 bg-slate-800 py-1.5 px-3 text-xs text-slate-200 focus:border-brand-500 focus:outline-none"
-                      />
+                      {zone[app] ? (
+                        <>
+                          <p className="text-xs text-slate-200 truncate">{zone[app]!.name}</p>
+                          <p className="truncate font-mono text-[10px] text-slate-500" title={zone[app]!.base_url}>{zone[app]!.base_url || 'No URL set'}</p>
+                        </>
+                      ) : (
+                        <p className="text-[11px] text-slate-500">None — uses the global {app} as fallback.</p>
+                      )}
+                      <button type="button" onClick={() => setTab('arr')} className="text-[10px] font-semibold text-purple-400 hover:text-purple-300">
+                        Manage on Arr tab →
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -4730,7 +4777,7 @@ export const Settings: React.FC = () => {
                 type="text"
                 value={newTokenName}
                 onChange={(e) => setNewTokenName(e.target.value)}
-                placeholder="Token name (e.g. Pacoli-Fetcher, Copy2Queue Hook)"
+                placeholder="Token name (e.g. Fetcher-Hook, Copy2Queue Hook)"
                 className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2 px-4 text-sm text-slate-200 focus:border-brand-500 focus:outline-none"
               />
 

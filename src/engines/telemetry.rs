@@ -29,22 +29,7 @@ pub fn compute_snapshot(pool: &FetcherPool, db: &Database) -> serde_json::Value 
 
     let grab_map = db.get_arr_grabs_lookup_map();
     for t in &mut torrents {
-        let hash_lower = t.hash_string.to_lowercase();
-        let name_lower = t.name.to_lowercase();
-        let stem_lower = {
-            let mut s = name_lower.as_str();
-            for ext in &[".mkv", ".mp4", ".avi", ".ts", ".flac", ".mp3"] {
-                if let Some(stripped) = s.strip_suffix(ext) {
-                    s = stripped;
-                }
-            }
-            s.to_string()
-        };
-        if let Some(grab) = grab_map
-            .get(&hash_lower)
-            .or_else(|| grab_map.get(&name_lower))
-            .or_else(|| grab_map.get(&stem_lower))
-        {
+        if let Some(grab) = Database::match_grab_in_map(&grab_map, &t.hash_string, &t.name) {
             t.arr_grab = Some(grab.clone());
         }
     }

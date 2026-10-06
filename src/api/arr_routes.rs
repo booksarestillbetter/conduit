@@ -674,7 +674,16 @@ async fn handle_arr_media_added(
         updated_at: Utc::now(),
     };
 
-    let _ = state.db.save_arr_grab(&grab_record);
+    // The stub carries no download id / release detail — if the match is a real grab (one that
+    // is bound to a torrent), saving it under that row's id would wipe its hash and quality and
+    // break torrent<->grab matching, so only (re)write rows that are themselves tracking stubs.
+    let existing_is_real_grab = existing_grab
+        .as_ref()
+        .and_then(|g| g.download_id.as_deref())
+        .map_or(false, |d| !d.trim().is_empty());
+    if !existing_is_real_grab {
+        let _ = state.db.save_arr_grab(&grab_record);
+    }
 
     if let (Some(mut ombi), Some(ref pid)) = (existing_ombi, &final_post_id) {
         ombi.mattermost_post_id = Some(pid.clone());
@@ -744,15 +753,19 @@ async fn handle_arr_media_deleted(
     let overview_text = media_obj.and_then(|m| m.get("overview")).and_then(|o| o.as_str()).map(|s| s.to_string());
     let poster_url = extract_poster_url(media_obj);
 
-    let existing_grab = state.db.find_arr_grab_by_ids_or_title(movie_id, series_id, imdb_id, tmdb_id, tvdb_id, Some(title)).ok().flatten();
+    // A delete applies to the whole media item, which may have several concurrent grabs
+    // (e.g. a 1080p and a 4K torrent) — mark every one of them, not just the newest.
+    let existing_grabs = state.db.find_arr_grabs_for_media(movie_id, series_id, None, None, Some(title)).unwrap_or_default();
     let now = Utc::now();
     let event_type_name = if is_movie { "MovieDelete" } else { "SeriesDelete" };
 
-    if let Some(mut existing) = existing_grab {
-        existing.status = "deleted".to_string();
-        existing.event_type = event_type_name.to_string();
-        existing.updated_at = now;
-        let _ = state.db.save_arr_grab(&existing);
+    if !existing_grabs.is_empty() {
+        for mut existing in existing_grabs {
+            existing.status = "deleted".to_string();
+            existing.event_type = event_type_name.to_string();
+            existing.updated_at = now;
+            let _ = state.db.save_arr_grab(&existing);
+        }
     } else {
         let grab_id = format!("del_{}_{}", app_name, uuid::Uuid::new_v4());
         let record = ArrGrabRecord {
@@ -938,7 +951,16 @@ async fn handle_lidarr_artist_added(
         updated_at: Utc::now(),
     };
 
-    let _ = state.db.save_arr_grab(&grab_record);
+    // The stub carries no download id / release detail — if the match is a real grab (one that
+    // is bound to a torrent), saving it under that row's id would wipe its hash and quality and
+    // break torrent<->grab matching, so only (re)write rows that are themselves tracking stubs.
+    let existing_is_real_grab = existing_grab
+        .as_ref()
+        .and_then(|g| g.download_id.as_deref())
+        .map_or(false, |d| !d.trim().is_empty());
+    if !existing_is_real_grab {
+        let _ = state.db.save_arr_grab(&grab_record);
+    }
 
     if let (Some(mut ombi), Some(ref pid)) = (existing_ombi, &final_post_id) {
         ombi.mattermost_post_id = Some(pid.clone());
@@ -991,14 +1013,19 @@ async fn handle_lidarr_deleted(
 
     let artist_id = artist.and_then(|a| a.get("id")).and_then(|v| v.as_i64());
     let album_id = payload.get("album").and_then(|a| a.get("id")).and_then(|v| v.as_i64());
-    let existing_grab = state.db.find_arr_grab_by_ids_or_title(None, None, None, None, None, Some(&title)).ok().flatten();
+    // Prefer the album id for an album delete (so the artist's other albums are untouched);
+    // an artist delete matches by artist id. Either way, mark every matching grab row.
+    let (match_artist_id, match_album_id) = if album_id.is_some() { (None, album_id) } else { (artist_id, None) };
+    let existing_grabs = state.db.find_arr_grabs_for_media(None, None, match_artist_id, match_album_id, Some(&title)).unwrap_or_default();
     let now = Utc::now();
 
-    if let Some(mut existing) = existing_grab {
-        existing.status = "deleted".to_string();
-        existing.event_type = event_type.to_string();
-        existing.updated_at = now;
-        let _ = state.db.save_arr_grab(&existing);
+    if !existing_grabs.is_empty() {
+        for mut existing in existing_grabs {
+            existing.status = "deleted".to_string();
+            existing.event_type = event_type.to_string();
+            existing.updated_at = now;
+            let _ = state.db.save_arr_grab(&existing);
+        }
     } else {
         let grab_id = format!("del_lidarr_{}", uuid::Uuid::new_v4());
         let record = ArrGrabRecord {
@@ -1123,6 +1150,22 @@ pub struct InboundZoneParams {
 fn resolve_zone<'a>(config: &'a crate::config::AppConfig, zone_param: Option<&str>) -> Option<&'a crate::config::ZoneConfig> {
     let zone_param = zone_param?;
     config.zones.iter().find(|z| z.id == zone_param)
+}
+
+/// A webhook's title/ID fallback lookup (used when the torrent hash didn't match any row) can
+/// land on a *different* torrent's row for the same media item — e.g. a 4K grab arriving while
+/// the 1080p grab of the same movie is still downloading. Reusing that row would overwrite it
+/// and make one grab record flip between the two torrents, so a row that is still in flight
+/// (`fetched`) under a different, known download id is treated as a separate grab. Finished or
+/// replaced rows (re-search / upgrade) are still reused as before.
+fn is_concurrent_distinct_grab(existing: &ArrGrabRecord, incoming_download_id: Option<&str>) -> bool {
+    distinct_in_flight_download(existing.download_id.as_deref(), &existing.status, incoming_download_id)
+}
+
+fn distinct_in_flight_download(existing_id: Option<&str>, existing_status: &str, incoming_id: Option<&str>) -> bool {
+    let incoming = incoming_id.map(str::trim).unwrap_or("");
+    let current = existing_id.map(str::trim).unwrap_or("");
+    !incoming.is_empty() && !current.is_empty() && !incoming.eq_ignore_ascii_case(current) && existing_status == "fetched"
 }
 
 /// Which Plex node(s) the notify-takeover should call for a given import: when the webhook
@@ -1357,7 +1400,8 @@ pub async fn process_sonarr_inbound_direct(
             let ep_num = episode_numbers.first().copied();
             state.db.find_arr_grab_by_series_episode(series_id, season_number, ep_num, ep_id).ok().flatten()
         })
-        .or_else(|| state.db.find_arr_grab_by_ids_or_title(None, series_id, imdb_id.as_deref(), None, tvdb_id, Some(series_title)).ok().flatten());
+        .or_else(|| state.db.find_arr_grab_by_ids_or_title(None, series_id, imdb_id.as_deref(), None, tvdb_id, Some(series_title)).ok().flatten())
+        .filter(|g| !is_concurrent_distinct_grab(g, download_id.as_deref()));
 
     let grab_id = existing_grab.as_ref().map(|g| g.id.clone())
         .or(download_id.clone())
@@ -1748,7 +1792,8 @@ pub async fn process_radarr_inbound_direct(
                 None
             }
         })
-        .or_else(|| state.db.find_arr_grab_by_ids_or_title(movie_id, None, imdb_id.as_deref(), tmdb_id, None, Some(movie_title)).ok().flatten());
+        .or_else(|| state.db.find_arr_grab_by_ids_or_title(movie_id, None, imdb_id.as_deref(), tmdb_id, None, Some(movie_title)).ok().flatten())
+        .filter(|g| !is_concurrent_distinct_grab(g, download_id.as_deref()));
 
     let grab_id = existing_grab.as_ref().map(|g| g.id.clone())
         .or(download_id.clone())
@@ -2164,7 +2209,8 @@ pub async fn process_lidarr_inbound_direct(
                 None
             }
         })
-        .or_else(|| state.db.find_arr_grab_by_ids_or_title(None, None, None, None, None, Some(&media_title)).ok().flatten());
+        .or_else(|| state.db.find_arr_grab_by_ids_or_title(None, None, None, None, None, Some(&media_title)).ok().flatten())
+        .filter(|g| !is_concurrent_distinct_grab(g, download_id.as_deref()));
 
     let grab_id = existing_grab.as_ref().map(|g| g.id.clone())
         .or(download_id.clone())
@@ -3478,6 +3524,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn concurrent_grab_with_different_download_id_is_not_merged() {
+        // 4K grab arrives while the 1080p torrent is still downloading -> separate row
+        assert!(distinct_in_flight_download(Some("AAA"), "fetched", Some("BBB")));
+        // same torrent (case-insensitive) -> same row
+        assert!(!distinct_in_flight_download(Some("aaa"), "fetched", Some("AAA")));
+        // previous grab already finished / replaced -> re-grab reuses the row as before
+        assert!(!distinct_in_flight_download(Some("AAA"), "imported", Some("BBB")));
+        assert!(!distinct_in_flight_download(Some("AAA"), "replaced", Some("BBB")));
+        // unknown ids on either side -> keep legacy matching
+        assert!(!distinct_in_flight_download(None, "fetched", Some("BBB")));
+        assert!(!distinct_in_flight_download(Some("AAA"), "fetched", None));
+    }
+
+    #[test]
     fn test_format_media_info_summary() {
         let file_json = json!({
             "mediaInfo": {
@@ -3607,7 +3667,7 @@ mod tests {
                     "messages": ["Release contains sample file"]
                 }
             ],
-            "downloadClient": "Transmission-Pacoli"
+            "downloadClient": "Transmission-Node"
         });
 
         let res = process_sonarr_inbound_direct(state.clone(), manual_payload, None).await;

@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.18.0] - 2026-10-05
+
+### Added
+
+- **Sonarr / Radarr / Lidarr instances can be scoped to a zone from the Arr tab.** Each app's card now has a "Zone-scoped instances" panel under the Primary: pick a zone, enter the instance's name, URL and API key, and it belongs to that zone only — it's used for that zone's `?zone=<id>` webhooks and grabs, not as a global instance. The Primary and its replicas remain the global instance. The Zones tab now just shows which instance each app has per zone (with a link back to the Arr tab) instead of a second, separate place to enter them. A zone with no instance of its own still falls back to the global one.
+- **Synapse nodes report trackers in the torrent list**, so the Fetchers sidebar's tracker list and tracker filter work for them. Needs Synapse 2.2.19+, which sends tracker hosts in its list stream (`TorrentSummary.tracker_hosts`). For an older Synapse, Conduit fetches each torrent's trackers through the existing detail RPC in the background (a few per cycle, refreshed every 10 minutes) — slower to fill in, but the same result.
+
+### Fixed
+
+- **Two torrents for the same movie/episode (e.g. a 1080p and a 4K grab at once) collapsed into one record, so the view flipped between them and enrichment produced duplicates.** `save_arr_grab` merged any new record into the first existing row with the same `movie_id` / `series_id` / scene name regardless of which torrent that row belonged to. A record still downloading under a *different* download id now stays its own row; finished or replaced rows still merge, so re-search and upgrade flows are unchanged.
+- **A torrent could be matched to another torrent's grab by name.** The torrent list, live telemetry, the detail view and "enrich all" now share one matcher: exact hash first, then release name / stem, skipping any grab already bound to a different torrent hash.
+- **Sonarr/Radarr "Added" webhooks overwrote an existing grab with an empty stub**, wiping its torrent id and quality and breaking later torrent↔grab matching. A row bound to a torrent is now left alone. The same applies to Lidarr's "Artist added".
+- **Movie / series / Lidarr "Delete" webhooks only marked one grab row deleted.** They now mark every row for the item, matched by Arr id (exact title only when no id is available, instead of the old substring match).
+- **Synapse nodes' tracker list vanished** from the Fetchers sidebar and "All nodes" + a tracker filter hid every Synapse torrent — see the Synapse tracker change above.
+
+---
+
 ## [0.17.0] - 2026-09-23
 
 ### Added
@@ -154,9 +171,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Database / Cache Lock Inversion Deadlock (`src/db/mod.rs`)**:
   - Fixed a deadlock between SQLite `conn.lock()` and `arr_grabs_cache.write()` in `get_arr_grabs_lookup_map()` where holding `arr_grabs_cache.write()` before acquiring `conn.lock()` collided with `record_arr_grab()` / `clear_arr_grabs()`.
   - Enforced strict unidirectional lock ordering (`conn.lock()` released prior to updating cache).
-- **Self-Contained Protobuf Compilation (`build.rs`, `Cargo.toml`, `.gitlab-ci.yml`)**:
+- **Self-Contained Protobuf Compilation (`build.rs`, `Cargo.toml`, CI config)**:
   - Integrated `protoc-bin-vendored` into build dependencies so `tonic-build` / `prost-build` automatically resolves `protoc` on any platform without requiring system packages.
-  - Added `protobuf-compiler` to GitLab CI test & lint stages for multi-tier redundancy.
+  - Added `protobuf-compiler` to the CI test & lint stages for multi-tier redundancy.
 
 ## [0.14.2] - 2026-08-31
 
@@ -339,7 +356,7 @@ Conduit now takes over Sonarr/Radarr's built-in "notify Plex" responsibility usi
 - **New: Sonarr/Radarr → Plex notify-takeover** — on every import webhook, Conduit itself now triggers a *targeted* Plex library section refresh (`GET /library/sections/{id}/refresh?path=...`) for just the affected show/movie folder, replicating exactly what Sonarr/Radarr's own built-in "Plex Media Server" connection does (enumerate sections, match by root folder path, partial rescan — not a full library refresh). Gated behind a new `plex.notify_on_import` setting (on by default); Settings UI now prompts to disable Sonarr/Radarr's own Plex connection to avoid double-triggering scans.
 - **API/Swagger completeness audit and fixes**: registered `GET /api/system/engines` (the v0.6.0 Platform Health endpoint) in the OpenAPI spec — it had a complete annotation but was never added to the paths list, so it was invisible in Swagger UI despite looking documented; added a full protocol description for `GET /api/ws`'s subscribe/channel WebSocket messages (previously undocumented entirely); reconciled inconsistent tags (`"System Logs"`/`"Transmission Nodes"` folded into `"System"`/`"Nodes"`; `"File Staging"` and `"Integrations"` now properly declared); `info.version` now reads from `Cargo.toml` via `env!("CARGO_PKG_VERSION")` instead of a hardcoded string that had drifted three versions stale; added `contact`/`license` metadata; added real error-response documentation (401/500, and clarified which "test connection" endpoints report failure as `success: false` in a 200 body rather than an HTTP error) to the highest-value previously-200-only endpoints: the three Arr webhook receivers and the Plex/Trakt/Arr "test connection" endpoints.
 - **README rewrite**: replaced the stale pre-rebrand branding (the project had been renamed to Conduit back in v0.5.0 but the README was never updated) with a public-facing overview — what Conduit is, a feature comparison against transgui, current daemon/integration support status (Transmission fully supported; qBittorrent/Deluge researched but not yet built, per `docs/tracker_support.md`), and a refreshed architecture diagram including the v0.6.0 WebSocket channel system and Platform Health, plus the new Plex OAuth/notify-takeover flow. Added a proper `LICENSE` file (MIT, as the README already claimed with none actually present).
-- **Pre-publish git history security audit**: scanned all 82 commits — no credentials, API keys, or private key material were ever committed. The only exposure was internal identifying info (an internal domain name, and `.gitlab-ci.yml`'s internal Docker deploy host plus two unrelated private GitLab project references) — nothing requiring history rewrite/squash, which would be destructive for no security benefit here. `.gitlab-ci.yml` was deliberately left as-is pending the user's own review, since it may still be load-bearing for their actual deployment pipeline.
+- **Pre-publish git history security audit**: scanned all 82 commits — no credentials, API keys, or private key material were ever committed. The only exposure was internal identifying info (an internal domain name, plus internal deploy-host and project references in the private CI configuration) — nothing requiring history rewrite/squash, which would be destructive for no security benefit here. The CI configuration is private-only and is not part of the published tree.
 - **Documented, not yet built**: a multi-tenant "zones" architecture (independent Sonarr/Radarr/Plex/Transmission stacks — e.g. a general library and a separate 4K library — with combined and per-zone views) was scoped in detail as a future initiative; see the session's planning notes for the recommended config/webhook/DB/UI build order.
 
 ## [0.6.0] - 2026-08-29
@@ -613,7 +630,7 @@ Extends the Sonarr/Radarr webhook rebuild in 0.5.5 to the remaining three integr
 
 ### Fixed
 - **CI Toolchain & SQLCipher System Dependencies**:
-  - Added `libssl-dev` and `pkg-config` package installation to the GitLab CI `test-rust` job container to provide C development headers required by `rusqlite` (`bundled-sqlcipher`) and OpenSSL linking.
+  - Added `libssl-dev` and `pkg-config` package installation to the CI `test-rust` job container to provide C development headers required by `rusqlite` (`bundled-sqlcipher`) and OpenSSL linking.
   - Ensured temporary database and configuration files remain pinned in `TestContext` across the lifecycle of integration tests.
 
 ---

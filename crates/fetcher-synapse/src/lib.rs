@@ -3,6 +3,7 @@ pub mod client;
 pub mod error;
 pub mod live_cache;
 pub mod proto;
+pub mod tracker_cache;
 
 pub use client::SynapseClient as SdkClient;
 pub use error::{Result as SdkResult, SynapseClientError};
@@ -12,7 +13,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use fetcher_core::{
     FetcherDriverFactory, FetcherNodeConfig, NativeCircuitBreakerStatus, NodeCapabilities,
-    RetrieverClientType, Torrent, TorrentClientTrait, TorrentFile, TorrentPeer, TrackerStat,
+    RetrieverClientType, Torrent, TorrentClientTrait, TorrentFile, TorrentPeer,
 };
 use proto::v2::{
     TorrentDetailEvent, TorrentState, TorrentSummary, UpdateSessionSettingsRequest,
@@ -28,6 +29,7 @@ pub struct SynapseClient {
     config: FetcherNodeConfig,
     client: SdkClient,
     cache: SynapseLiveCache,
+    trackers: tracker_cache::TrackerCache,
     alerts: alerts::AlertFeed,
 }
 
@@ -58,12 +60,14 @@ impl SynapseClient {
         }
 
         let cache = SynapseLiveCache::spawn(client.clone());
+        let trackers = tracker_cache::TrackerCache::spawn(client.clone(), cache.clone());
         let alerts = alerts::AlertFeed::spawn(client.clone(), config.name.clone());
 
         Self {
             config,
             client,
             cache,
+            trackers,
             alerts,
         }
     }
@@ -106,6 +110,13 @@ impl SynapseClient {
             s.download_dir
         };
         let progress = s.progress as f64;
+        // Newer Synapse sends tracker hosts right in the list stream. Older ones don't, so for
+        // those fall back to trackers fetched via the detail RPC (see `tracker_cache`).
+        let tracker_stats = if s.tracker_hosts.is_empty() {
+            self.trackers.get(&s.hash)
+        } else {
+            tracker_cache::tracker_stats_from_hosts(&s.tracker_hosts)
+        };
 
         Torrent {
             id,
@@ -131,7 +142,7 @@ impl SynapseClient {
             added_date: s.added_at,
             done_date: 0,
             download_dir,
-            tracker_stats: Vec::new(),
+            tracker_stats,
             files: None,
             peers: None,
             comment: None,
@@ -304,29 +315,7 @@ impl TorrentClientTrait for SynapseClient {
                 .collect(),
         );
 
-        torrent.tracker_stats = event
-            .trackers
-            .into_iter()
-            .map(|t| {
-                let host = t
-                    .url
-                    .split("://")
-                    .nth(1)
-                    .and_then(|s| s.split('/').next())
-                    .unwrap_or(&t.url)
-                    .to_string();
-                TrackerStat {
-                    announce: t.url,
-                    host,
-                    seeder_count: t.seeders as i64,
-                    leecher_count: t.leechers as i64,
-                    download_count: 0,
-                    last_announce_succeeded: t.failure_reason.is_none(),
-                    last_announce_result: t.failure_reason.unwrap_or(t.status),
-                    is_backup: false,
-                }
-            })
-            .collect();
+        torrent.tracker_stats = tracker_cache::tracker_stats_from_status(event.trackers);
 
         torrent.files = Some(
             event

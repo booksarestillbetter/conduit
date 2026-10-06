@@ -82,20 +82,7 @@ pub async fn list_torrents(
 
     let grab_map = db.get_arr_grabs_lookup_map();
     for t in &mut torrents {
-        let hash_lower = t.hash_string.to_lowercase();
-        let name_lower = t.name.to_lowercase();
-        let stem_lower = {
-            let mut s = name_lower.as_str();
-            for ext in &[".mkv", ".mp4", ".avi", ".ts", ".flac", ".mp3"] {
-                if let Some(stripped) = s.strip_suffix(ext) {
-                    s = stripped;
-                }
-            }
-            s.to_string()
-        };
-        if let Some(grab) = grab_map.get(&hash_lower)
-            .or_else(|| grab_map.get(&name_lower))
-            .or_else(|| grab_map.get(&stem_lower)) {
+        if let Some(grab) = Database::match_grab_in_map(&grab_map, &t.hash_string, &t.name) {
             t.arr_grab = Some(grab.clone());
         }
     }
@@ -411,7 +398,7 @@ pub async fn get_torrent(
                 }
             }
             if stem != name_clean {
-                db.find_arr_grab_by_hash_or_name("", stem).ok().flatten()
+                db.find_arr_grab_by_hash_or_name(&raw_torrent.hash_string, stem).ok().flatten()
             } else {
                 None
             }
@@ -1970,9 +1957,7 @@ pub async fn enrich_all_torrents(
     let unenriched: Vec<_> = torrents
         .into_iter()
         .filter(|t| {
-            let hash_lower = t.hash_string.to_lowercase();
-            let name_lower = t.name.to_lowercase();
-            grab_map.get(&hash_lower).or_else(|| grab_map.get(&name_lower)).is_none()
+            Database::match_grab_in_map(&grab_map, &t.hash_string, &t.name).is_none()
         })
         .collect();
     let total_unenriched = unenriched.len();

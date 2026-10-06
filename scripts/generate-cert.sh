@@ -5,7 +5,7 @@ set -e
 #  Conduit SSL Certificate Generation Helper
 # ==============================================================================
 
-TARGET_DIR="${1:-/store/conduit/config/ssl}"
+TARGET_DIR="${1:-/data/ssl}"
 DOMAIN="${2:-conduit.local}"
 DAYS="${3:-3650}"
 

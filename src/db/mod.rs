@@ -856,12 +856,21 @@ impl Database {
             }
         }
 
+        // A row still downloading (`fetched`) under a *different* known download id is another
+        // torrent for the same media item (e.g. 1080p + 4K grabbed at once) and must stay its own
+        // row — merging into it would overwrite one torrent's identity with the other's.
+        // Finished / replaced rows are still merged into (re-search and upgrade flows).
+        let incoming_did = record.download_id.as_deref().map(str::trim).unwrap_or("").to_string();
+        let not_other_active_torrent = |n: u8| {
+            format!("AND NOT (status = 'fetched' AND download_id IS NOT NULL AND download_id != '' AND ?{n} != '' AND LOWER(download_id) != LOWER(?{n}))")
+        };
+
         // 2. Check by movie_id or series_id + season
         if target_id == record.id {
             if let Some(mid) = record.movie_id {
                 let existing: Option<String> = conn.query_row(
-                    "SELECT id FROM arr_grabs WHERE movie_id = ?1 LIMIT 1",
-                    params![mid],
+                    &format!("SELECT id FROM arr_grabs WHERE movie_id = ?1 {} LIMIT 1", not_other_active_torrent(2)),
+                    params![mid, incoming_did],
                     |row| row.get(0),
                 ).optional().unwrap_or(None);
                 if let Some(eid) = existing {
@@ -869,8 +878,8 @@ impl Database {
                 }
             } else if let Some(sid) = record.series_id {
                 let existing: Option<String> = conn.query_row(
-                    "SELECT id FROM arr_grabs WHERE series_id = ?1 AND (season_number IS ?2 OR season_number IS NULL) LIMIT 1",
-                    params![sid, record.season_number],
+                    &format!("SELECT id FROM arr_grabs WHERE series_id = ?1 AND (season_number IS ?2 OR season_number IS NULL) {} LIMIT 1", not_other_active_torrent(3)),
+                    params![sid, record.season_number, incoming_did],
                     |row| row.get(0),
                 ).optional().unwrap_or(None);
                 if let Some(eid) = existing {
@@ -882,8 +891,8 @@ impl Database {
         // 3. Check by scene_name or release_title
         if target_id == record.id && !record.scene_name.is_empty() {
             let existing: Option<String> = conn.query_row(
-                "SELECT id FROM arr_grabs WHERE scene_name = ?1 OR release_title = ?1 LIMIT 1",
-                params![record.scene_name],
+                &format!("SELECT id FROM arr_grabs WHERE (scene_name = ?1 OR release_title = ?1) {} LIMIT 1", not_other_active_torrent(2)),
+                params![record.scene_name, incoming_did],
                 |row| row.get(0),
             ).optional().unwrap_or(None);
             if let Some(eid) = existing {
@@ -1393,11 +1402,14 @@ impl Database {
                             quality, size_bytes, imdb_id, tmdb_id, tvdb_id, runtime_mins, rating,
                             mattermost_post_id, payload_json, created_at, updated_at, artist_id, album_id, zone_id
                      FROM arr_grabs
-                     WHERE scene_name = ?1 COLLATE NOCASE OR release_title = ?1 COLLATE NOCASE OR title = ?1 COLLATE NOCASE
+                     WHERE (scene_name = ?1 COLLATE NOCASE OR release_title = ?1 COLLATE NOCASE OR title = ?1 COLLATE NOCASE)
+                       AND (?2 = '' OR download_id IS NULL OR download_id = ''
+                            OR LOWER(download_id) = LOWER(?2)
+                            OR LENGTH(download_id) NOT IN (40, 64))
                      ORDER BY created_at DESC LIMIT 1"
                 )?;
 
-                let grab = stmt.query_row(params![candidate], Self::map_arr_grab_row).optional()?;
+                let grab = stmt.query_row(params![candidate, hash_clean], Self::map_arr_grab_row).optional()?;
                 if grab.is_some() {
                     return Ok(grab);
                 }
@@ -1455,6 +1467,76 @@ impl Database {
             }
         }
         Ok(None)
+    }
+
+    /// True when `grab` is bound to a specific torrent hash (a 40- or 64-char hex `download_id`)
+    /// that differs from `torrent_hash` — i.e. it belongs to some *other* torrent, so a
+    /// name-based match must never attach it to this one (e.g. the 1080p and 4K grabs of one movie).
+    pub fn grab_bound_to_other_torrent(grab: &ArrGrabRecord, torrent_hash: &str) -> bool {
+        let did = grab.download_id.as_deref().map(str::trim).unwrap_or("");
+        let hash = torrent_hash.trim();
+        (did.len() == 40 || did.len() == 64)
+            && did.bytes().all(|b| b.is_ascii_hexdigit())
+            && !hash.is_empty()
+            && !did.eq_ignore_ascii_case(hash)
+    }
+
+    /// Torrent -> grab correlation against the lookup map: exact hash first, then release
+    /// name / stem, skipping any grab that is bound to a different torrent hash.
+    pub fn match_grab_in_map<'a>(
+        map: &'a std::collections::HashMap<String, ArrGrabRecord>,
+        hash: &str,
+        name: &str,
+    ) -> Option<&'a ArrGrabRecord> {
+        if let Some(g) = map.get(&hash.trim().to_lowercase()) {
+            return Some(g);
+        }
+        let name_lower = name.to_lowercase();
+        let mut stem = name_lower.as_str();
+        for ext in &[".mkv", ".mp4", ".avi", ".ts", ".flac", ".mp3"] {
+            if let Some(stripped) = stem.strip_suffix(ext) {
+                stem = stripped;
+            }
+        }
+        map.get(&name_lower)
+            .filter(|g| !Self::grab_bound_to_other_torrent(g, hash))
+            .or_else(|| map.get(stem).filter(|g| !Self::grab_bound_to_other_torrent(g, hash)))
+    }
+
+    /// Every grab row for one media item (for events that apply to the whole item, like a
+    /// delete, where several concurrent torrents may each have their own row). Matches by
+    /// the provided Arr ids; only when no id is available falls back to an exact title match.
+    pub fn find_arr_grabs_for_media(
+        &self,
+        movie_id: Option<i64>,
+        series_id: Option<i64>,
+        artist_id: Option<i64>,
+        album_id: Option<i64>,
+        title: Option<&str>,
+    ) -> anyhow::Result<Vec<ArrGrabRecord>> {
+        let conn = self.conn.lock();
+        let has_id = movie_id.is_some() || series_id.is_some() || artist_id.is_some() || album_id.is_some();
+        let title_clean = title.unwrap_or("").trim().to_string();
+        let mut stmt = conn.prepare(
+            "SELECT id, scene_name, release_title, event_type, item_type,
+                    series_id, movie_id, season_number, episode_numbers, episode_ids,
+                    indexer, download_client, download_id, status, re_searched,
+                    re_search_count, title, year, overview, poster_url, genres,
+                    quality, size_bytes, imdb_id, tmdb_id, tvdb_id, runtime_mins, rating,
+                    mattermost_post_id, payload_json, created_at, updated_at, artist_id, album_id, zone_id
+             FROM arr_grabs
+             WHERE (?1 IS NOT NULL AND movie_id = ?1)
+                OR (?2 IS NOT NULL AND series_id = ?2)
+                OR (?3 IS NOT NULL AND artist_id = ?3)
+                OR (?4 IS NOT NULL AND album_id = ?4)
+                OR (?5 = 0 AND ?6 != '' AND LOWER(title) = LOWER(?6))
+             ORDER BY created_at DESC"
+        )?;
+        let rows = stmt.query_map(
+            params![movie_id, series_id, artist_id, album_id, has_id as i64, title_clean],
+            Self::map_arr_grab_row,
+        )?;
+        Ok(rows.flatten().collect())
     }
 
     pub fn find_arr_grab_by_ids_or_title(

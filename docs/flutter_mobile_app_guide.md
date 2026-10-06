@@ -32,7 +32,7 @@ The Conduit Mobile App is designed as an autonomous, high-performance client con
                │ HTTP / JSON                   │ WS Frame
 ┌──────────────▼───────────────────────────────▼───────────────┐
 │                     Conduit Rust Server Backend                │
-│              (Pacoli / Conduit Cluster Daemon)                 │
+│                (Conduit Cluster Daemon)                        │
 └──────────────────────────────────────────────────────────────┘
 ```
 
