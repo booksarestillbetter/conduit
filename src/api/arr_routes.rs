@@ -680,7 +680,7 @@ async fn handle_arr_media_added(
     let existing_is_real_grab = existing_grab
         .as_ref()
         .and_then(|g| g.download_id.as_deref())
-        .map_or(false, |d| !d.trim().is_empty());
+        .is_some_and(|d| !d.trim().is_empty());
     if !existing_is_real_grab {
         let _ = state.db.save_arr_grab(&grab_record);
     }
@@ -957,7 +957,7 @@ async fn handle_lidarr_artist_added(
     let existing_is_real_grab = existing_grab
         .as_ref()
         .and_then(|g| g.download_id.as_deref())
-        .map_or(false, |d| !d.trim().is_empty());
+        .is_some_and(|d| !d.trim().is_empty());
     if !existing_is_real_grab {
         let _ = state.db.save_arr_grab(&grab_record);
     }
