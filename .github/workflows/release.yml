@@ -48,7 +48,16 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config protobuf-compiler libssl-dev
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+
+      - name: Install protoc
+        # Ubuntu 22.04's apt-get protobuf-compiler (3.12) predates proto3 `optional` field
+        # support without --experimental_allow_proto3_optional, which fetcher-synapse's
+        # build.rs doesn't pass. Install a modern protoc instead of apt's.
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '27.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:
