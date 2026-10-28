@@ -160,6 +160,9 @@ export const Settings: React.FC = () => {
   // Hook Script Generator & Remote Ingestion States
   const [scriptFormat, setScriptFormat] = useState<'sh' | 'py' | 'pl'>('sh');
   const [copiedCurl, setCopiedCurl] = useState(false);
+  const [embedApiKey, setEmbedApiKey] = useState('');
+  const [embedNode, setEmbedNode] = useState('');
+  const [embedInsecure, setEmbedInsecure] = useState(false);
   const [copiedScript, setCopiedScript] = useState(false);
   const [scriptContent, setScriptContent] = useState<string>('');
   const [loadingScript, setLoadingScript] = useState(false);
@@ -196,7 +199,7 @@ export const Settings: React.FC = () => {
   const loadHookScript = async (fmt: string) => {
     setLoadingScript(true);
     try {
-      const text = await fetchHookScript(fmt);
+      const text = await fetchHookScript(fmt, window.location.origin, embedApiKey, embedNode, embedInsecure);
       setScriptContent(text);
     } catch (e) {
       console.error('Failed to load hook script:', e);
@@ -209,7 +212,7 @@ export const Settings: React.FC = () => {
     if (tab === 'sync') {
       loadHookScript(scriptFormat);
     }
-  }, [tab, scriptFormat]);
+  }, [tab, scriptFormat, embedApiKey, embedNode, embedInsecure]);
 
   useEffect(() => {
     loadData();
@@ -649,6 +652,9 @@ export const Settings: React.FC = () => {
           : ['*'];
       const res = await createToken(newTokenName.trim(), scopes);
       setNewRawToken(res.raw_token);
+      if (newTokenScope === 'fetcher') {
+        setEmbedApiKey(res.raw_token);
+      }
       setNewTokenName('');
       const updated = await fetchTokens();
       setTokens(updated);
@@ -3070,6 +3076,47 @@ export const Settings: React.FC = () => {
               </div>
             </div>
 
+            {/* Embedded Key/Node — baked into the generated script so it works without the
+                fetcher node having CONDUIT_API_KEY/CONDUIT_URL set in its own environment. */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-1 block">
+                  API Key to Embed
+                </label>
+                <input
+                  type="text"
+                  value={embedApiKey}
+                  onChange={(e) => setEmbedApiKey(e.target.value)}
+                  placeholder="Generate a Fetcher-scoped token under API Tokens, or paste one here"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2 px-4 text-xs font-mono text-slate-200 focus:border-brand-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-1 block">
+                  Node Name to Embed
+                </label>
+                <input
+                  type="text"
+                  value={embedNode}
+                  onChange={(e) => setEmbedNode(e.target.value)}
+                  placeholder="Transmission"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-800 py-2 px-4 text-xs font-mono text-slate-200 focus:border-brand-500 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <label className="flex items-center space-x-2 text-xs text-slate-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={embedInsecure}
+                onChange={(e) => setEmbedInsecure(e.target.checked)}
+                className="rounded border-slate-700 bg-slate-800 text-brand-500 focus:ring-brand-500"
+              />
+              <span>
+                Skip TLS certificate verification (self-signed Conduit URL) — only use this if {window.location.origin} is a self-signed/internal cert you trust
+              </span>
+            </label>
+
             {/* Quick Install cURL Box */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
@@ -3078,14 +3125,20 @@ export const Settings: React.FC = () => {
                   <span>One-Liner cURL Download Command for Fetcher Nodes</span>
                 </label>
                 <span className="text-[11px] text-slate-500 font-mono">
-                  Environment variables take precedence on runtime
+                  Key/URL/node above are baked into the downloaded script itself
                 </span>
               </div>
 
               {(() => {
                 const host = window.location.origin;
                 const ext = scriptFormat === 'py' ? 'py' : scriptFormat === 'pl' ? 'pl' : 'sh';
-                const curlCmd = `curl -sSL -H "Authorization: Bearer $CONDUIT_API_KEY" "${host}/api/sync/hook-script?format=${scriptFormat}" -o /opt/transmission/conduit-fetch-hook.${ext} && chmod +x /opt/transmission/conduit-fetch-hook.${ext}`;
+                const authHeader = embedApiKey ? `Bearer ${embedApiKey}` : 'Bearer $CONDUIT_API_KEY';
+                const query = new URLSearchParams({ format: scriptFormat, url: host });
+                if (embedApiKey) query.set('api_key', embedApiKey);
+                if (embedNode) query.set('node', embedNode);
+                if (embedInsecure) query.set('insecure', 'true');
+                const curlInsecureFlag = embedInsecure ? '-k ' : '';
+                const curlCmd = `curl -sSL ${curlInsecureFlag}-H "Authorization: ${authHeader}" "${host}/api/sync/hook-script?${query.toString()}" -o /opt/transmission/conduit-fetch-hook.${ext} && chmod +x /opt/transmission/conduit-fetch-hook.${ext}`;
 
                 return (
                   <div className="flex items-center space-x-2 rounded-xl border border-slate-800 bg-slate-950 p-2.5 font-mono text-xs text-sky-300">

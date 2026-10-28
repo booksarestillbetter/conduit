@@ -151,6 +151,9 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compou
 
   useEffect(() => {
     if (!compoundId) return;
+    setTorrent(null);
+    setError(null);
+    setLoading(true);
     setSpeedHistory([]);
     loadDetails();
     const interval = setInterval(loadDetails, 1000);
@@ -162,6 +165,7 @@ export const TorrentDetailsModal: React.FC<TorrentDetailsModalProps> = ({ compou
     try {
       const data = await fetchTorrentDetails(compoundId);
       setTorrent(data);
+      setError(null);
       setSpeedHistory((prev) => {
         // Find peers actively transferring or top connected peers in the swarm
         const activePeers = (data.peers || [])

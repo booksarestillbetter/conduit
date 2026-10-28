@@ -168,6 +168,16 @@ pub async fn get_torrent(
         } else {
             return Err(StatusCode::NOT_FOUND);
         }
+    } else if let Some((n, id_str)) = compound_id.split_once(':') {
+        // The id half is sometimes actually a torrent hash (e.g. a caller that only has the
+        // hash on hand, not the node's numeric id, and prefixed it with a node/client label
+        // that may not even be a real pool node) rather than a true "node:id" pair. Resolve it
+        // the same way the no-colon case above does before treating it as node:id below.
+        if n != "pipeline" && id_str.parse::<i64>().is_err() {
+            if let Some(t) = pool.get_torrents(None, None, None).into_iter().find(|t| t.hash_string.eq_ignore_ascii_case(id_str)) {
+                compound_id = t.compound_id;
+            }
+        }
     }
 
     // Check if pipeline item
@@ -894,7 +904,18 @@ pub async fn migrate_torrent(
         None
     };
 
-    let fallback_magnet = format!("magnet:?xt=urn:btih:{}&dn={}", torrent.hash_string, urlencoding::encode(&torrent.name));
+    // Carry the source torrent's own trackers forward as `&tr=` params. The target node gets
+    // nothing from the magnet's info-hash/name alone, and BEP 9 metadata exchange (what a bare
+    // magnet add triggers) never transfers announce URLs either -- without this, a migrated
+    // torrent lands on the target with zero trackers and no way to find peers once DHT/PEX/LSD
+    // dry up.
+    let mut fallback_magnet = format!("magnet:?xt=urn:btih:{}&dn={}", torrent.hash_string, urlencoding::encode(&torrent.name));
+    for tracker in &torrent.tracker_stats {
+        if !tracker.announce.is_empty() {
+            fallback_magnet.push_str("&tr=");
+            fallback_magnet.push_str(&urlencoding::encode(&tracker.announce));
+        }
+    }
     let final_magnet = magnet.unwrap_or(&fallback_magnet);
 
     // 3. Determine target download dir

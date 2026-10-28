@@ -765,6 +765,8 @@ pub struct HookScriptQueryParams {
     pub node: Option<String>,
     /// Default API token (optional)
     pub api_key: Option<String>,
+    /// Skip TLS certificate verification when CONDUIT_URL is https (self-signed certs). Default: false
+    pub insecure: Option<bool>,
 }
 
 #[utoipa::path(
@@ -791,6 +793,7 @@ pub async fn get_hook_script(
     });
     let default_node = params.node.unwrap_or_else(|| "Transmission".to_string());
     let api_key = params.api_key.unwrap_or_default();
+    let insecure_default = if params.insecure.unwrap_or(false) { "1" } else { "0" };
     let format = params.format.unwrap_or_else(|| "sh".to_string()).to_lowercase();
 
     let (content_type, script) = match format.as_str() {
@@ -819,6 +822,12 @@ CONDUIT_URL = os.environ.get("CONDUIT_URL", "{base_url}").rstrip("/")
 CONDUIT_API_KEY = os.environ.get("CONDUIT_API_KEY", "{api_key}")
 CONDUIT_NODE_NAME = os.environ.get("CONDUIT_NODE_NAME", "{default_node}")
 CONDUIT_DEBUG = os.environ.get("CONDUIT_DEBUG", os.environ.get("DEBUG", "0")).lower() in ("1", "true", "yes")
+# Skip TLS certificate verification (self-signed CONDUIT_URL). Not recommended outside a trusted LAN.
+CONDUIT_INSECURE = os.environ.get("CONDUIT_INSECURE", "{insecure_default}").lower() in ("1", "true", "yes")
+SSL_CONTEXT = None
+if CONDUIT_INSECURE:
+    import ssl
+    SSL_CONTEXT = ssl._create_unverified_context()
 
 def main():
     parser = argparse.ArgumentParser(description="Conduit Transmission Intake Hook")
@@ -881,7 +890,7 @@ def main():
 
     data = {{}}
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=SSL_CONTEXT) as resp:
             resp_body = resp.read().decode("utf-8")
             if is_debug:
                 print(f"[DEBUG] Classification Response: {{resp_body}}", file=sys.stderr)
@@ -972,7 +981,7 @@ def main():
         }}
     )
     try:
-        urllib.request.urlopen(n_req, timeout=5)
+        urllib.request.urlopen(n_req, timeout=5, context=SSL_CONTEXT)
         print("[INFO] Staging and Conduit notification completed successfully.")
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
@@ -984,7 +993,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-"#, base_url = base_url, api_key = api_key, default_node = default_node);
+"#, base_url = base_url, api_key = api_key, default_node = default_node, insecure_default = insecure_default);
             ("text/x-python", py_code)
         }
         "pl" | "perl" => {
@@ -1002,6 +1011,9 @@ my $CONDUIT_URL = $ENV{{CONDUIT_URL}} || "{base_url}";
 my $CONDUIT_API_KEY = $ENV{{CONDUIT_API_KEY}} || "{api_key}";
 my $CONDUIT_NODE_NAME = $ENV{{CONDUIT_NODE_NAME}} || "{default_node}";
 my $CONDUIT_DEBUG = $ENV{{CONDUIT_DEBUG}} || $ENV{{DEBUG}} || 0;
+# Skip TLS certificate verification (self-signed CONDUIT_URL). Not recommended outside a trusted LAN.
+my $CONDUIT_INSECURE = $ENV{{CONDUIT_INSECURE}} || "{insecure_default}";
+my $verify_ssl = $CONDUIT_INSECURE =~ /^(1|true|yes)$/i ? 0 : 1;
 
 my $torrent_name     = $ENV{{TR_TORRENT_NAME}} || "";
 my $torrent_hash     = $ENV{{TR_TORRENT_HASH}} || "";
@@ -1036,7 +1048,7 @@ die "[ERROR] Torrent name is required\n" unless $torrent_name;
 print "[INFO] Processing torrent: '$torrent_name' (node: $node_name, hash: $torrent_hash)\n";
 
 my $json = JSON::PP->new->utf8;
-my $http = HTTP::Tiny->new(timeout => 10);
+my $http = HTTP::Tiny->new(timeout => 10, verify_SSL => $verify_ssl);
 
 # 1. Query Conduit API
 my $payload = $json->encode({{
@@ -1143,7 +1155,7 @@ if ($n_resp->{{success}}) {{
         print STDERR "[DEBUG] Notification Response: $n_resp->{{content}}\n";
     }}
 }}
-"#, base_url = base_url, api_key = api_key, default_node = default_node);
+"#, base_url = base_url, api_key = api_key, default_node = default_node, insecure_default = insecure_default);
             ("text/x-perl", pl_code)
         }
         _ => {
@@ -1160,6 +1172,12 @@ CONDUIT_URL="${{CONDUIT_URL:-{base_url}}}"
 CONDUIT_API_KEY="${{CONDUIT_API_KEY:-{api_key}}}"
 CONDUIT_NODE_NAME="${{CONDUIT_NODE_NAME:-{default_node}}}"
 CONDUIT_DEBUG="${{CONDUIT_DEBUG:-${{DEBUG:-0}}}}"
+# Skip TLS certificate verification (self-signed CONDUIT_URL). Not recommended outside a trusted LAN.
+CONDUIT_INSECURE="${{CONDUIT_INSECURE:-{insecure_default}}}"
+CURL_INSECURE_FLAG=""
+case "$CONDUIT_INSECURE" in
+    1|true|yes|TRUE|YES) CURL_INSECURE_FLAG="-k" ;;
+esac
 
 # Parse CLI arguments and debug flag
 for arg in "$@"; do
@@ -1245,7 +1263,7 @@ if [ -n "$CONDUIT_API_KEY" ]; then
 fi
 
 HTTP_CODE=0
-RESPONSE=$(curl -sSL --max-time 10 -w "\n%{{http_code}}" -X POST "$CONDUIT_URL/api/sync/classify" \
+RESPONSE=$(curl -sSL $CURL_INSECURE_FLAG --max-time 10 -w "\n%{{http_code}}" -X POST "$CONDUIT_URL/api/sync/classify" \
     -H "Content-Type: application/json" \
     ${{AUTH_HEADER:+-H "$AUTH_HEADER"}} \
     ${{API_KEY_HEADER:+-H "$API_KEY_HEADER"}} \
@@ -1357,7 +1375,7 @@ if [ "$CONDUIT_DEBUG" = "1" ] || [ "$CONDUIT_DEBUG" = "true" ]; then
     echo "[DEBUG] Notification Payload: $NOTIFY_PAYLOAD" >&2
 fi
 
-NOTIFY_RESP=$(curl -sSL --max-time 5 -w "\n%{{http_code}}" -X POST "$CONDUIT_URL/api/sync/notify-download" \
+NOTIFY_RESP=$(curl -sSL $CURL_INSECURE_FLAG --max-time 5 -w "\n%{{http_code}}" -X POST "$CONDUIT_URL/api/sync/notify-download" \
     -H "Content-Type: application/json" \
     ${{AUTH_HEADER:+-H "$AUTH_HEADER"}} \
     ${{API_KEY_HEADER:+-H "$API_KEY_HEADER"}} \
@@ -1379,7 +1397,7 @@ else
         echo "[DEBUG] Conduit Notification Response: $NOTIFY_BODY" >&2
     fi
 fi
-"#, base_url = base_url, api_key = api_key, default_node = default_node);
+"#, base_url = base_url, api_key = api_key, default_node = default_node, insecure_default = insecure_default);
             ("text/x-shellscript", sh_code)
         }
     };

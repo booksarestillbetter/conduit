@@ -541,10 +541,13 @@ export async function fetchGrabHistory(id: string): Promise<import('../types').A
   return res.json();
 }
 
-export async function fetchHookScript(format = 'sh', url?: string): Promise<string> {
+export async function fetchHookScript(format = 'sh', url?: string, apiKey?: string, node?: string, insecure?: boolean): Promise<string> {
   const query = new URLSearchParams();
   if (format) query.set('format', format);
   if (url) query.set('url', url);
+  if (apiKey) query.set('api_key', apiKey);
+  if (node) query.set('node', node);
+  if (insecure) query.set('insecure', 'true');
 
   const res = await apiFetch(`${API_BASE}/api/sync/hook-script?${query.toString()}`, { headers: getAuthHeaders() });
   if (!res.ok) throw new Error('Failed to fetch hook script');

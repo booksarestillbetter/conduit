@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.19.0] - 2026-10-28
+
+### Fixed
+
+- **Migrating a torrent to another fetcher node dropped its trackers, so it never actually downloaded on the destination.** `migrate_torrent` built the re-add from `torrent.magnet_link`, which every fetcher backend hardcodes to `None` — so the add always fell back to a bare `magnet:?xt=urn:btih:<hash>&dn=<name>` with no trackers at all, even though the source torrent's real announce URLs were sitting right there in `tracker_stats`. The migration now carries them forward as `&tr=` params on the magnet.
+- **"Inspect Live Torrent" from the Pipeline Browser could open a different torrent than the one you clicked**, or show a previous torrent's stale data under an error. The button sent the torrent's hash in the slot the API expects a numeric per-node id, so the lookup 404'd; the details modal then kept rendering whatever torrent it had last loaded successfully instead of clearing out on a failed fetch. The backend now falls back to hash matching the same way the no-id-prefix case already did, and the modal clears its state whenever you open a different torrent.
+- **The fetcher done-hook script had no way to authenticate with Conduit unless you manually set `CONDUIT_API_KEY`/`CONDUIT_URL` on the fetcher node itself** — easy to miss, and a redeploy of a node's container can silently reset it. Every classify call then 401'd and the script fell back to its own crude local heuristics, so Media Routing's tracker rules (and Arr-grab matching) never actually ran, regardless of what was configured in Settings.
+
+### Added
+
+- **Settings → Sync can now embed a real API key, Conduit URL, and node name directly into the generated hook script**, instead of leaving them to be configured separately on the fetcher node. Generating a new Fetcher-scoped token under API Tokens auto-fills it here; both the live script preview/download and the one-liner cURL command pick it up immediately.
+- **A "skip TLS certificate verification" option for the hook script**, for a Conduit URL behind a self-signed certificate. Supported in all three generated formats (`sh`/`py`/`pl`).
+
+---
+
 ## [0.18.0] - 2026-10-05
 
 ### Added
