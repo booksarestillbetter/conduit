@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.19.1] - 2026-10-29
+
+### Security
+
+- Bumped `rustls`, `rustls-webpki`, `h2`, and `tokio` to pull in upstream fixes, most notably an unbounded-empty-DATA-frames denial-of-service in `h2` (reachable directly against Conduit's own HTTP server) and a `Debug` impl in `rustls` that could leak TLS session secrets into logs. The remaining advisory flagged by `cargo audit` (`zip`, pulled in only as a build-time dependency of the bundled Swagger UI assets, never used to extract untrusted input at runtime) is tracked as an accepted exception in `.cargo/audit.toml` pending a semver-compatible fix upstream.
+
+---
+
 ## [0.19.0] - 2026-10-28
 
 ### Fixed

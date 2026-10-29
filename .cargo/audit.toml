@@ -1,0 +1,15 @@
+[advisories]
+# These three advisories are all on `zip`, pulled in only as a build-time
+# dependency of `utoipa-swagger-ui` (used to unpack the bundled Swagger UI
+# assets at compile time). Conduit never uses `zip` to extract untrusted
+# input at runtime, so the symlink/permission-confinement issues they
+# describe aren't reachable here. The fix (zip >=9.0.0) requires bumping
+# `utoipa-swagger-ui` to 10.x, which pulls in `utoipa` 6.x and breaks the
+# build against our `utoipa` 5.3 OpenAPI types (two incompatible `utoipa`
+# majors in the tree) -- revisit once utoipa-swagger-ui offers a 9.x-series
+# release built against utoipa 5, or we're ready to migrate to utoipa 6.
+ignore = [
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+]
