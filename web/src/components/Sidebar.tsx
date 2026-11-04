@@ -21,6 +21,7 @@ import {
   ExternalLink,
   Globe,
   Boxes,
+  BarChart3,
 } from 'lucide-react';
 import { AggregateStats, AppConfig, ZoneConfig } from '../types';
 import { fetchSettings } from '../services/api';
@@ -89,6 +90,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const mainNav = [
     { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { path: '/fetchers', label: 'Fetchers', icon: Layers },
+    { path: '/stats', label: 'Stats', icon: BarChart3 },
     { path: '/pipeline', label: "🐕 Conduit Pipeline", icon: Compass },
     { path: '/archive', label: 'Ghost Archive', icon: Ghost },
     { path: '/settings', label: 'Conduit Settings', icon: Settings },

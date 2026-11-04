@@ -12,6 +12,7 @@ pub mod poller;
 pub mod registry;
 pub mod retention;
 pub mod space_manager;
+pub mod stats_history;
 mod supervisor;
 pub mod telemetry;
 pub mod watch_sync;
@@ -158,6 +159,14 @@ pub fn start_all_engines(
         let (config_mgr, db, registry) = (config_mgr.clone(), db.clone(), registry.clone());
         spawn_supervised("retention", registry.clone(), move || {
             retention::run_retention_loop(config_mgr.clone(), db.clone(), TaskHandle::new(registry.clone(), "retention"))
+        });
+    }
+
+    // 16. Stats History (periodic snapshots + sampled peer-client breakdown for the Stats page)
+    {
+        let (pool, db, registry) = (pool.clone(), db.clone(), registry.clone());
+        spawn_supervised("stats_history", registry.clone(), move || {
+            stats_history::run_stats_history_loop(pool.clone(), db.clone(), TaskHandle::new(registry.clone(), "stats_history"))
         });
     }
 }

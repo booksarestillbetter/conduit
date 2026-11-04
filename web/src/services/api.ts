@@ -200,6 +200,29 @@ export async function fetchBandwidthHistory(hours: number): Promise<import('../t
   return res.json();
 }
 
+/** Live cluster stats totals + breakdowns (fetcher node, tracker, media type) — computed
+ * fresh from whatever the poller already has cached, no extra network cost. */
+export async function fetchCurrentStats(): Promise<import('../types').StatsSnapshot> {
+  const res = await apiFetch(`${API_BASE}/api/stats/current`, { headers: getAuthHeaders() });
+  if (!res.ok) throw new Error('Failed to fetch current stats');
+  return res.json();
+}
+
+/** Historical stats snapshots (one every ~5 minutes) for up to the last 30 days. */
+export async function fetchStatsHistory(hours: number): Promise<import('../types').StatsSnapshot[]> {
+  const res = await apiFetch(`${API_BASE}/api/stats/history?hours=${hours}`, { headers: getAuthHeaders() });
+  if (!res.ok) throw new Error('Failed to fetch stats history');
+  return res.json();
+}
+
+/** Historical remote peer-client breakdown samples (one every ~15 minutes) — there's no live
+ * variant; treat the last element as "current" (see `stats::sample_peer_clients`). */
+export async function fetchPeerClientHistory(hours: number): Promise<import('../types').PeerClientSnapshot[]> {
+  const res = await apiFetch(`${API_BASE}/api/stats/peer-clients/history?hours=${hours}`, { headers: getAuthHeaders() });
+  if (!res.ok) throw new Error('Failed to fetch peer client history');
+  return res.json();
+}
+
 export async function addTorrent(payload: {
   node: string;
   magnet_or_url?: string;

@@ -9,6 +9,7 @@ mod events;
 mod ip_asn;
 mod notify;
 mod plex_client;
+mod stats;
 mod trakt_client;
 mod fetcher;
 mod web;

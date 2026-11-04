@@ -18,6 +18,7 @@ const Settings = React.lazy(() => import('./pages/Settings').then((m) => ({ defa
 const EventsLog = React.lazy(() => import('./pages/EventsLog').then((m) => ({ default: m.EventsLog })));
 const Docs = React.lazy(() => import('./pages/Docs').then((m) => ({ default: m.Docs })));
 const PipelineBrowserLazy = React.lazy(() => import('./pages/PipelineBrowser').then((m) => ({ default: m.PipelineBrowser })));
+const StatsLazy = React.lazy(() => import('./pages/Stats').then((m) => ({ default: m.Stats })));
 
 const PageLoadingFallback: React.FC = () => (
   <div className="flex-1 flex items-center justify-center p-12 text-slate-500">
@@ -348,6 +349,7 @@ export const App: React.FC = () => {
   }
 
   const isFetchersView = currentRoute.startsWith('/fetchers');
+  const isStatsView = currentRoute.startsWith('/stats');
   const isPipelineView = currentRoute.startsWith('/pipeline');
   const isArchiveView = currentRoute.startsWith('/archive');
   const isDashboardView = currentRoute === '/' || currentRoute.startsWith('/dashboard');
@@ -421,7 +423,7 @@ export const App: React.FC = () => {
 
           {isArchiveView && <ArchivedGrabsView zone={activeZone === 'all' ? undefined : activeZone} />}
 
-          {(isPipelineView || isSettingsView || isLogsView || isDocsView) && (
+          {(isPipelineView || isSettingsView || isLogsView || isDocsView || isStatsView) && (
             <React.Suspense fallback={<PageLoadingFallback />}>
               {isPipelineView && (
                 <PipelineBrowserLazy
@@ -433,6 +435,7 @@ export const App: React.FC = () => {
               {isSettingsView && <Settings />}
               {isLogsView && <EventsLog recentEvents={recentEvents} />}
               {isDocsView && <Docs />}
+              {isStatsView && <StatsLazy />}
             </React.Suspense>
           )}
 

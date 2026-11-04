@@ -9,6 +9,7 @@ pub mod openapi;
 pub mod search_routes;
 pub mod plex_oauth_routes;
 pub mod settings_routes;
+pub mod stats_routes;
 pub mod sync_routes;
 pub mod torrent_routes;
 pub mod webhook_routes;
@@ -153,6 +154,11 @@ pub fn build_api_router(state: AppState) -> Router {
         // Events & Health
         .route("/api/events", get(sync_routes::get_events))
         .route("/api/health", get(sync_routes::health_check))
+
+        // Stats (totals, breakdowns, and historical trends for the Stats page)
+        .route("/api/stats/current", get(stats_routes::get_current_stats))
+        .route("/api/stats/history", get(stats_routes::get_stats_history))
+        .route("/api/stats/peer-clients/history", get(stats_routes::get_peer_client_history))
 
         // Metrics & System
         .route("/metrics", get(metrics_routes::prometheus_metrics))

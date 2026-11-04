@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use async_trait::async_trait;
@@ -23,6 +23,29 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(90);
 const DELTA_MAX_GAP: Duration = Duration::from_secs(40);
 /// Safety net: even when every delta succeeds, re-read the full list this often.
 const FULL_REFRESH_EVERY: Duration = Duration::from_secs(300);
+/// A full-library `torrent-get` fetches every field (including `trackerStats`) for every
+/// torrent in one response. On a large library that single response is the most likely thing
+/// to stall or get cut off mid-transfer on a busy daemon, so the full refresh is split into
+/// batches of this many torrents (by id) instead of one all-or-nothing request -- and, per
+/// `FullScan`'s doc comment, only one batch is fetched per poll tick rather than the whole
+/// sweep in one call, so the UI keeps seeing progressively fresher data instead of nothing
+/// until the entire library has been re-read.
+const FULL_REFRESH_BATCH_SIZE: usize = 300;
+
+/// An in-progress full-refresh sweep, resumed one batch per `get_torrents` call instead of
+/// fetched all at once. Seeded by a cheap id + activity prefetch (`id`, `status`,
+/// `rateDownload`, `rateUpload` -- none of which are expensive to serialize, unlike
+/// `trackerStats`), sorted so actively-transferring torrents are re-read first since they're
+/// the ones most likely to have gone stale and most likely to be what's actually on screen.
+#[derive(Debug)]
+struct FullScan {
+    /// Remaining ids to (re-)fetch this sweep, most-active-first, popped in
+    /// `FULL_REFRESH_BATCH_SIZE` chunks off the front each call.
+    remaining: VecDeque<i64>,
+    /// Every id this sweep's prefetch saw. Once `remaining` drains, any cached torrent whose
+    /// id isn't in this set was removed on the daemon since the last sweep and gets dropped.
+    all_ids: HashSet<i64>,
+}
 
 /// Client-side mirror of the daemon's torrent list, kept current with delta polls.
 #[derive(Debug, Default)]
@@ -32,6 +55,10 @@ struct ListCache {
     last_full: Option<Instant>,
     /// Cleared if the daemon rejects `recently-active` (very old Transmission).
     delta_unsupported: bool,
+    /// `Some` while a full-refresh sweep is in progress (see `FullScan`). Delta polling is
+    /// skipped while a sweep is running -- it takes a handful of ticks at most to drain, and
+    /// keeping the two from interleaving keeps the merge logic simple.
+    full_scan: Option<FullScan>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +240,7 @@ impl TransmissionClient {
         let use_delta = {
             let cache = self.list_cache.lock();
             !cache.delta_unsupported
+                && cache.full_scan.is_none()
                 && cache.last_ok.is_some_and(|t| t.elapsed() < DELTA_MAX_GAP)
                 && cache.last_full.is_some_and(|t| t.elapsed() < FULL_REFRESH_EVERY)
         };
@@ -250,21 +278,83 @@ impl TransmissionClient {
             }
         }
 
-        let args = json!({ "fields": Self::list_fields() });
+        // Full refresh: resume an in-progress sweep, or start a new one. Either way this call
+        // does at most one batch's worth of work (see FULL_REFRESH_BATCH_SIZE/FullScan's doc
+        // comments) and merges it straight into the mirror before returning, so a big
+        // library's sweep never blocks the caller from seeing fresher data until the whole
+        // thing finishes -- each poll tick's worth of progress lands immediately.
+        let existing_scan = self.list_cache.lock().full_scan.take();
+        let mut scan = match existing_scan {
+            Some(s) => s,
+            None => {
+                // Cheap id + activity prefetch (no trackerStats or other heavy fields) to seed
+                // a fresh sweep, sorted so actively-transferring torrents get re-read first --
+                // they're both the most likely to have gone stale and the most likely to
+                // actually be on someone's screen right now.
+                let id_args = json!({ "fields": ["id", "status", "rateDownload", "rateUpload"] });
+                let id_res = self.send_rpc_with_timeout("torrent-get", Some(id_args), Some(LIST_TIMEOUT)).await;
+                let id_res = match id_res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.list_cache.lock().last_ok = None;
+                        return Err(e);
+                    }
+                };
+                let mut entries: Vec<(i64, bool)> = id_res["torrents"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|t| {
+                                let id = t.get("id")?.as_i64()?;
+                                let active = t.get("rateDownload").and_then(|v| v.as_i64()).unwrap_or(0) > 0
+                                    || t.get("rateUpload").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+                                Some((id, active))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Active first; stable sort keeps the daemon's own ordering within each group.
+                entries.sort_by_key(|(_, active)| !active);
+                let all_ids: HashSet<i64> = entries.iter().map(|(id, _)| *id).collect();
+                FullScan { remaining: entries.into_iter().map(|(id, _)| id).collect(), all_ids }
+            }
+        };
+
+        let batch: Vec<i64> = (0..FULL_REFRESH_BATCH_SIZE.min(scan.remaining.len()))
+            .filter_map(|_| scan.remaining.pop_front())
+            .collect();
+
+        let args = json!({ "fields": Self::list_fields(), "ids": batch });
         let res = self.send_rpc_with_timeout("torrent-get", Some(args), Some(LIST_TIMEOUT)).await;
         let res = match res {
             Ok(r) => r,
             Err(e) => {
-                self.list_cache.lock().last_ok = None;
+                // Keep the sweep's remaining work queued (including this failed batch) so the
+                // next poll tick retries it instead of restarting the whole sweep from scratch.
+                scan.remaining.extend(batch);
+                let mut cache = self.list_cache.lock();
+                cache.full_scan = Some(scan);
+                cache.last_ok = None;
                 return Err(e);
             }
         };
-        let torrents = self.parse_torrents(&res["torrents"])?;
+        let fetched = self.parse_torrents(&res["torrents"])?;
+
         let mut cache = self.list_cache.lock();
-        cache.torrents = torrents.iter().map(|t| (t.id, t.clone())).collect();
+        for t in fetched {
+            cache.torrents.insert(t.id, t);
+        }
         cache.last_ok = Some(Instant::now());
-        cache.last_full = Some(Instant::now());
-        Ok(torrents)
+        if scan.remaining.is_empty() {
+            // Sweep complete: drop any cached torrent that wasn't in this sweep's fresh id
+            // list -- removed on the daemon since the last sweep saw it.
+            cache.torrents.retain(|id, _| scan.all_ids.contains(id));
+            cache.last_full = Some(Instant::now());
+            cache.full_scan = None;
+        } else {
+            cache.full_scan = Some(scan);
+        }
+        Ok(cache.torrents.values().cloned().collect())
     }
 
     pub async fn get_torrent_details(&self, id: i64) -> anyhow::Result<Torrent> {
@@ -657,9 +747,17 @@ mod tests {
         json!({"id": id, "name": name, "hashString": format!("{id:040}")})
     }
 
+    /// A full (non-delta) read is now two requests: a tiny id-only prefetch, then one batched
+    /// `ids`-scoped fetch per `FULL_REFRESH_BATCH_SIZE` chunk (just one batch for these small
+    /// test libraries) -- see `FULL_REFRESH_BATCH_SIZE`'s doc comment for why.
+    fn id_list_reply(ids: &[i64]) -> Value {
+        json!({"result":"success","arguments":{"torrents": ids.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()}})
+    }
+
     #[tokio::test]
     async fn after_a_full_read_polls_only_ask_for_what_changed() {
         let (port, seen) = mock(vec![
+            id_list_reply(&[1, 2, 3]),
             json!({"result":"success","arguments":{"torrents":[row(1,"a"),row(2,"b"),row(3,"c")]}}),
             json!({"result":"success","arguments":{"torrents":[row(2,"b2"),row(4,"d")],"removed":[3]}}),
         ])
@@ -675,16 +773,20 @@ mod tests {
         assert_eq!(names, ["a", "b2", "d"], "changed rows replace, new rows join, removed rows leave");
 
         let seen = seen.lock();
-        assert!(seen[0]["arguments"].get("ids").is_none(), "first read is a full read");
-        assert_eq!(seen[1]["arguments"]["ids"], "recently-active");
+        assert!(seen[0]["arguments"].get("ids").is_none(), "first request is the id prefetch");
+        assert!(seen[1]["arguments"]["ids"].is_array(), "second request is the batched full read");
+        assert_eq!(seen[2]["arguments"]["ids"], "recently-active");
     }
 
     #[tokio::test]
     async fn a_daemon_that_rejects_recently_active_falls_back_to_full_reads() {
         let (port, seen) = mock(vec![
+            id_list_reply(&[1]),
             json!({"result":"success","arguments":{"torrents":[row(1,"a")]}}),
             json!({"result":"invalid argument"}),
+            id_list_reply(&[1, 2]),
             json!({"result":"success","arguments":{"torrents":[row(1,"a"),row(2,"b")]}}),
+            id_list_reply(&[1, 2, 3]),
             json!({"result":"success","arguments":{"torrents":[row(1,"a"),row(2,"b"),row(3,"c")]}}),
         ])
         .await;
@@ -694,15 +796,21 @@ mod tests {
         assert_eq!(c.get_torrents(None).await.unwrap().len(), 3);
 
         let seen = seen.lock();
-        assert_eq!(seen[1]["arguments"]["ids"], "recently-active");
-        assert!(seen[2]["arguments"].get("ids").is_none(), "retried as a full read");
-        assert!(seen[3]["arguments"].get("ids").is_none(), "and stays on full reads");
+        assert!(seen[0]["arguments"].get("ids").is_none(), "call 1: id prefetch");
+        assert!(seen[1]["arguments"]["ids"].is_array(), "call 1: batched full read");
+        assert_eq!(seen[2]["arguments"]["ids"], "recently-active", "call 2: delta attempted first");
+        assert!(seen[3]["arguments"].get("ids").is_none(), "call 2: rejected delta retries as an id prefetch");
+        assert!(seen[4]["arguments"]["ids"].is_array(), "call 2: ...then a batched full read");
+        assert!(seen[5]["arguments"].get("ids").is_none(), "call 3: stays on full reads (id prefetch)");
+        assert!(seen[6]["arguments"]["ids"].is_array(), "call 3: stays on full reads (batch)");
     }
 
     #[tokio::test]
     async fn a_stale_mirror_is_never_trusted() {
         let (port, seen) = mock(vec![
+            id_list_reply(&[1]),
             json!({"result":"success","arguments":{"torrents":[row(1,"a")]}}),
+            id_list_reply(&[1, 2]),
             json!({"result":"success","arguments":{"torrents":[row(1,"a"),row(2,"b")]}}),
         ])
         .await;
@@ -711,6 +819,53 @@ mod tests {
         // Simulate a long silence: changes in the gap would be outside the 60 s window.
         c.list_cache.lock().last_ok = Some(Instant::now() - DELTA_MAX_GAP - Duration::from_secs(1));
         assert_eq!(c.get_torrents(None).await.unwrap().len(), 2);
-        assert!(seen.lock()[1]["arguments"].get("ids").is_none());
+        let seen = seen.lock();
+        assert!(seen[2]["arguments"].get("ids").is_none(), "stale mirror forces a fresh id prefetch");
+        assert!(seen[3]["arguments"]["ids"].is_array(), "...not a delta read");
+    }
+
+    #[tokio::test]
+    async fn a_large_sweep_resumes_across_calls_and_fetches_active_torrents_first() {
+        // 350 torrents forces two batches (FULL_REFRESH_BATCH_SIZE = 300). Only the last one
+        // (id 350) is marked actively transferring in the prefetch; everything else is idle.
+        let n: i64 = 350;
+        let prefetch_rows: Vec<Value> = (1..=n)
+            .map(|id| {
+                if id == n {
+                    json!({"id": id, "status": 4, "rateDownload": 5000, "rateUpload": 0})
+                } else {
+                    json!({"id": id, "status": 0, "rateDownload": 0, "rateUpload": 0})
+                }
+            })
+            .collect();
+        let batch1_rows: Vec<Value> = (1..=300).map(|id| row(id, "idle")).collect();
+        let batch2_rows: Vec<Value> = (301..=350).map(|id| row(id, "idle")).collect();
+
+        let (port, seen) = mock(vec![
+            json!({"result":"success","arguments":{"torrents": prefetch_rows}}),
+            json!({"result":"success","arguments":{"torrents": batch1_rows}}),
+            json!({"result":"success","arguments":{"torrents": batch2_rows}}),
+        ])
+        .await;
+        let c = client(port);
+
+        let first_call = c.get_torrents(None).await.unwrap();
+        assert_eq!(first_call.len(), 300, "first call only completes one batch of the sweep");
+
+        let second_call = c.get_torrents(None).await.unwrap();
+        assert_eq!(second_call.len(), 350, "second call resumes and completes the sweep");
+
+        let seen = seen.lock();
+        assert_eq!(seen.len(), 3, "prefetch + 2 batches, no re-fetching from scratch on resume");
+        assert!(seen[0]["arguments"].get("ids").is_none(), "first request is the id+activity prefetch");
+        let first_batch_ids = seen[1]["arguments"]["ids"].as_array().unwrap();
+        assert_eq!(first_batch_ids.len(), 300);
+        assert_eq!(
+            first_batch_ids[0].as_i64(),
+            Some(n),
+            "the actively-transferring torrent is fetched first, regardless of its position in the daemon's own ordering"
+        );
+        let second_batch_ids = seen[2]["arguments"]["ids"].as_array().unwrap();
+        assert_eq!(second_batch_ids.len(), 50, "the remaining 50 idle torrents finish the sweep");
     }
 }

@@ -825,3 +825,52 @@ export interface UniversalSearchResponse {
   /** Non-fatal per-source failures (e.g. a Sonarr instance timed out). */
   warnings: string[];
 }
+
+// --- Stats Page ---
+
+export interface NodeBreakdown {
+  node: string;
+  client_type: 'transmission' | 'qbittorrent' | 'deluge' | 'synapse';
+  connected: boolean;
+  torrents: number;
+  size_bytes: number;
+  rate_download: number;
+  rate_upload: number;
+}
+
+export interface TrackerBreakdown {
+  host: string;
+  torrents: number;
+  seeders: number;
+  leechers: number;
+}
+
+export interface MediaTypeBreakdown {
+  media_type: 'tv' | 'movie' | 'music' | 'unknown';
+  torrents: number;
+  size_bytes: number;
+}
+
+export interface PeerClientBreakdown {
+  client_name: string;
+  peer_count: number;
+  torrents_seen_on: number;
+}
+
+export interface StatsSnapshot {
+  time: number;
+  total_torrents: number;
+  total_size_bytes: number;
+  total_seeders: number;
+  total_leechers: number;
+  total_download_speed: number;
+  total_upload_speed: number;
+  by_node: NodeBreakdown[];
+  by_tracker: TrackerBreakdown[];
+  by_media_type: MediaTypeBreakdown[];
+}
+
+export interface PeerClientSnapshot {
+  time: number;
+  by_client: PeerClientBreakdown[];
+}

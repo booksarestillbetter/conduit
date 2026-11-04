@@ -442,6 +442,33 @@ impl Database {
                 download_speed INTEGER NOT NULL,
                 upload_speed INTEGER NOT NULL
             );
+
+            -- One row every ~5 minutes from `engines::stats_history`, backing the Stats page's
+            -- historical trend charts. Breakdown vectors are stored as JSON (see
+            -- `ActiveCircuitBreaker.paused_torrents` for the existing precedent of this) since
+            -- their dimensions (node names, tracker hosts, media types) vary. Pruned to the
+            -- last 30 days on every insert, same inline-prune approach as the bandwidth table
+            -- above.
+            CREATE TABLE IF NOT EXISTS stats_history (
+                time INTEGER PRIMARY KEY,
+                total_torrents INTEGER NOT NULL,
+                total_size_bytes INTEGER NOT NULL,
+                total_seeders INTEGER NOT NULL,
+                total_leechers INTEGER NOT NULL,
+                total_download_speed INTEGER NOT NULL,
+                total_upload_speed INTEGER NOT NULL,
+                by_node TEXT NOT NULL,
+                by_tracker TEXT NOT NULL,
+                by_media_type TEXT NOT NULL
+            );
+
+            -- One row every ~15 minutes from `engines::stats_history`'s much slower peer-client
+            -- sampler (see `stats::sample_peer_clients` for why it's separate from, and rarer
+            -- than, `stats_history` above). Pruned to the last 30 days on every insert.
+            CREATE TABLE IF NOT EXISTS stats_peer_clients (
+                time INTEGER PRIMARY KEY,
+                by_client TEXT NOT NULL
+            );
         ")?;
 
         // Migration safety checks for existing databases
@@ -1729,6 +1756,108 @@ impl Database {
                 download_speed: row.get(1)?,
                 upload_speed: row.get(2)?,
                 top_torrents: Vec::new(),
+            })
+        })?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    // --- Stats History ---
+    /// Inserts one periodic stats snapshot and prunes anything older than 30 days in the same
+    /// call -- at a 5-minute cadence that's ~8,640 rows at steady state, so this stays cheap
+    /// indefinitely without depending on the user-configurable retention engine.
+    pub fn insert_stats_snapshot(&self, snapshot: &crate::stats::StatsSnapshot) -> anyhow::Result<()> {
+        let by_node = serde_json::to_string(&snapshot.by_node)?;
+        let by_tracker = serde_json::to_string(&snapshot.by_tracker)?;
+        let by_media_type = serde_json::to_string(&snapshot.by_media_type)?;
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO stats_history (
+                time, total_torrents, total_size_bytes, total_seeders, total_leechers,
+                total_download_speed, total_upload_speed, by_node, by_tracker, by_media_type
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                snapshot.time,
+                snapshot.total_torrents as i64,
+                snapshot.total_size_bytes,
+                snapshot.total_seeders,
+                snapshot.total_leechers,
+                snapshot.total_download_speed,
+                snapshot.total_upload_speed,
+                by_node,
+                by_tracker,
+                by_media_type,
+            ],
+        )?;
+        let cutoff = snapshot.time - 30 * 24 * 3600 * 1000;
+        conn.execute("DELETE FROM stats_history WHERE time < ?1", params![cutoff])?;
+        Ok(())
+    }
+
+    /// Returns stats snapshots from the last `since_ms` milliseconds, oldest first.
+    pub fn list_stats_history(&self, since_ms: i64) -> anyhow::Result<Vec<crate::stats::StatsSnapshot>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT time, total_torrents, total_size_bytes, total_seeders, total_leechers,
+                    total_download_speed, total_upload_speed, by_node, by_tracker, by_media_type
+             FROM stats_history WHERE time >= ?1 ORDER BY time ASC",
+        )?;
+        let rows = stmt.query_map(params![since_ms], |row| {
+            let by_node: String = row.get(7)?;
+            let by_tracker: String = row.get(8)?;
+            let by_media_type: String = row.get(9)?;
+            let total_torrents: i64 = row.get(1)?;
+            Ok(crate::stats::StatsSnapshot {
+                time: row.get(0)?,
+                total_torrents: total_torrents as usize,
+                total_size_bytes: row.get(2)?,
+                total_seeders: row.get(3)?,
+                total_leechers: row.get(4)?,
+                total_download_speed: row.get(5)?,
+                total_upload_speed: row.get(6)?,
+                by_node: serde_json::from_str(&by_node).unwrap_or_default(),
+                by_tracker: serde_json::from_str(&by_tracker).unwrap_or_default(),
+                by_media_type: serde_json::from_str(&by_media_type).unwrap_or_default(),
+            })
+        })?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    /// Inserts one peer-client sample and prunes anything older than 30 days, same shape as
+    /// `insert_stats_snapshot`.
+    pub fn insert_peer_client_snapshot(&self, snapshot: &crate::stats::PeerClientSnapshot) -> anyhow::Result<()> {
+        let by_client = serde_json::to_string(&snapshot.by_client)?;
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO stats_peer_clients (time, by_client) VALUES (?1, ?2)",
+            params![snapshot.time, by_client],
+        )?;
+        let cutoff = snapshot.time - 30 * 24 * 3600 * 1000;
+        conn.execute("DELETE FROM stats_peer_clients WHERE time < ?1", params![cutoff])?;
+        Ok(())
+    }
+
+    /// Returns peer-client snapshots from the last `since_ms` milliseconds, oldest first. The
+    /// frontend treats the last element as "current" -- there's no separate on-demand live
+    /// endpoint for this one, since computing it fresh is the expensive path (see
+    /// `stats::sample_peer_clients`).
+    pub fn list_peer_client_history(&self, since_ms: i64) -> anyhow::Result<Vec<crate::stats::PeerClientSnapshot>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT time, by_client FROM stats_peer_clients WHERE time >= ?1 ORDER BY time ASC",
+        )?;
+        let rows = stmt.query_map(params![since_ms], |row| {
+            let by_client: String = row.get(1)?;
+            Ok(crate::stats::PeerClientSnapshot {
+                time: row.get(0)?,
+                by_client: serde_json::from_str(&by_client).unwrap_or_default(),
             })
         })?;
         let mut list = Vec::new();

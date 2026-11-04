@@ -101,6 +101,9 @@ use utoipa::OpenApi;
         super::metrics_routes::get_engine_health,
         super::metrics_routes::get_crash_log,
         super::ws::ws_handler,
+        super::stats_routes::get_current_stats,
+        super::stats_routes::get_stats_history,
+        super::stats_routes::get_peer_client_history,
     ),
     components(
         schemas(
@@ -219,6 +222,12 @@ use utoipa::OpenApi;
             crate::config::BackupBundle,
             crate::config::BackupExportRequest,
             crate::config::BackupRestoreRequest,
+            crate::stats::StatsSnapshot,
+            crate::stats::NodeBreakdown,
+            crate::stats::TrackerBreakdown,
+            crate::stats::MediaTypeBreakdown,
+            crate::stats::PeerClientSnapshot,
+            crate::stats::PeerClientBreakdown,
         )
     ),
     tags(
@@ -231,6 +240,7 @@ use utoipa::OpenApi;
         (name = "File Staging", description = "Queue Routing, Classification Rules, Media Type Definitions & the copy2queue Hook Script"),
         (name = "Metrics", description = "Prometheus Metrics & Hardware System Telemetry"),
         (name = "System", description = "Audit Logs, Health Checks, Background Engine ('Platform Health') Status, and the Real-Time WebSocket Stream"),
+        (name = "Stats", description = "Cluster-Wide Totals, Breakdowns (Fetcher Node, Tracker, Media Type, Remote Peer Client), and Historical Trends"),
     ),
     info(
         title = "Conduit API",

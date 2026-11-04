@@ -1,27 +1,28 @@
 # Conduit
 
-**A unified, multi-node fetcher control plane (Synapse, Transmission, qBittorrent, Deluge) and Sonarr/Radarr/Lidarr/Plex media lifecycle automation daemon — written in Rust, with a React + Tailwind web UI.**
+**A unified control plane for your torrent daemons — any of them — plus Sonarr/Radarr/Lidarr/Plex/Ombi media lifecycle automation. Written in Rust, with a React + Tailwind web UI.**
 
-Conduit sits in front of your entire download and media stack — every fetcher node (Synapse, Transmission, qBittorrent, Deluge), every Sonarr/Radarr/Lidarr instance, Plex, and Ombi — and gives you one dashboard, one API, and one set of automation rules across all of it. It replaces a pile of shell scripts, cron jobs, and single-purpose dashboards (transgui, a Sonarr "connect" webhook here, a cron-triggered rsync there) with one always-on Rust daemon that watches everything and reacts in real time.
+Conduit isn't a client for one particular torrent daemon — it's a generic manager that sits in front of however many daemons you run (Synapse, Transmission, qBittorrent, Deluge, mixed and matched across general, 4K, or remote seedbox nodes) and your entire media pipeline around them: every Sonarr/Radarr/Lidarr instance, Plex, and Ombi. One dashboard, one API, one set of automation rules across all of it. It replaces a pile of shell scripts, cron jobs, and single-daemon dashboards with one always-on Rust daemon that watches everything and reacts in real time.
 
 ---
 
 ## Why Conduit?
 
-| | **Conduit** | **transgui** | **Sonarr/Radarr alone** |
+| | **Conduit** | **A daemon's own bundled Web UI** | **Sonarr/Radarr alone** |
 |---|---|---|---|
-| Multi-daemon fetcher control | ✅ Unlimited nodes across Synapse, Transmission, qBittorrent, Deluge | ✅ (Transmission only) | ❌ |
-| Cross-node compound torrent IDs (`node:hash`) | ✅ | ❌ (one server at a time) | ❌ |
+| Multi-daemon fetcher control | ✅ Unlimited nodes across Synapse, Transmission, qBittorrent, Deluge | ❌ One daemon, one UI, no cross-daemon view | ❌ |
+| Cross-node compound torrent IDs (`node:hash`) | ✅ | ❌ (no concept of other daemons) | ❌ |
 | Arr-aware enrichment (poster, quality, release match) | ✅ One-click, pulls from Sonarr/Radarr | ❌ | N/A |
 | 4-tier media classification & queue routing | ✅ Tracker rules → regex → node overrides | ❌ | Partial (per-instance only) |
 | Tracker circuit breaker & swarm pressure relief | ✅ Automatic canary-probe recovery | ❌ | ❌ |
 | Sonarr/Radarr/Lidarr/Plex/Ombi webhook ingestion | ✅ One inbound hub, dog-themed rich cards | ❌ | Each app notifies independently |
 | Plex "scan this folder" notification | ✅ Conduit triggers it directly (OAuth-linked) | ❌ | ✅ (built into each app separately) |
+| Cluster stats, breakdowns & historical trends | ✅ By node, tracker, media type, peer client | ❌ (per-daemon stats only, no history) | ❌ |
 | Real-time push (WebSocket) | ✅ Torrents, pipeline, events, platform health | ❌ (polls) | ❌ |
 | Background task/engine health visibility | ✅ "Platform Health" panel | ❌ | ❌ |
-| Runs headless as a daemon | ✅ Single static binary + Docker image | ❌ (desktop GUI client) | ✅ |
+| Runs headless as a daemon | ✅ Single static binary + Docker image | Varies by daemon | ✅ |
 
-transgui is a desktop client for *one* Transmission server. Conduit is the thing that runs 24/7 on your server, watches *all* of your fetcher nodes and Arr instances together, and automates the parts of the pipeline that would otherwise need a human (or a fragile cron job) watching them.
+A daemon's own web UI only ever shows you that one daemon, in isolation, with none of the media-pipeline automation below. Conduit is the thing that runs 24/7 on your server, watches *all* of your fetcher nodes and Arr instances together — regardless of which torrent client backs each one — and automates the parts of the pipeline that would otherwise need a human (or a fragile cron job) watching them.
 
 ---
 
@@ -60,7 +61,7 @@ flowchart TD
     end
 
     subgraph StagingQueue ["📁 Queue Routing & Post Staging"]
-        Copy2Queue["copy2queue Done Hook (Zero-Copy Hardlinks)"]
+        Copy2Queue["Fetcher Done-Hook (Zero-Copy Hardlinks)"]
         TvPost["/downloads/tv_post"]
         MoviePost["/downloads/movie_post"]
         UhdPost["/downloads/tvUHD & movieUHD"]
@@ -94,16 +95,17 @@ flowchart TD
 ---
 
 ### ⚡ 1. Unified Multi-Node Fetcher Control
-- **Cluster Control Plane**: Manages multiple fetcher instances concurrently (e.g. Synapse, Transmission, qBittorrent, Deluge across general, 4K, or remote seedboxes).
-- **Compound Torrent IDs (`"{node}:{id}"`)**: Cluster-wide search, filtering by node/tracker/status, and bulk start, pause, delete, and location changes.
+- **Cluster Control Plane**: Manages multiple fetcher instances concurrently, any mix of supported backends — Synapse, Transmission, qBittorrent, Deluge — across general, 4K, or remote seedbox nodes, through one `TorrentClientTrait` driver interface.
+- **Compound Torrent IDs (`"{node}:{id}"`)**: Cluster-wide search, filtering by node/tracker/status, and bulk start, pause, delete, and location changes — the same actions, the same UI, no matter which daemon a torrent actually lives on.
 - **Deep Torrent Inspector**: horizontal scrolling lifecycle timeline, per-file progress and priorities, live peer telemetry with encryption badges, tracker swarm health, and real-time SVG bandwidth curves.
 - **✨ Enrich from Arr**: One-click lookup against Sonarr/Radarr/Lidarr to upgrade a manually-added torrent with posters, quality, and TMDb/TVDb/MusicBrainz IDs.
+- **Cross-Node Migration**: Move a torrent from one fetcher node to another, trackers and all, without losing swarm connectivity.
 
 ### ⚡ 2. Tracker Circuit Breaker & Swarm Pressure Relief
-Detects tracker-level failure patterns (`530`, `502/503/504`, `403`, `429`, connection refused, timeouts), designates a single canary probe torrent, pauses everything else on that tracker to stop hammering it, and auto-resumes the whole set the moment the canary succeeds again — with a notification either way.
+Detects tracker-level failure patterns (`530`, `502/503/504`, `403`, `429`, connection refused, timeouts), designates a single canary probe torrent, pauses everything else on that tracker to stop hammering it, and auto-resumes the whole set the moment the canary succeeds again — with a notification either way. Works whether the breaker is Conduit's own, or mirrored from a backend's native breaker.
 
 ### 🗂️ 3. 4-Tier Media Classification & Queue Routing
-On every completed torrent: **(1)** exact match against active Sonarr/Radarr/Lidarr grabs, **(2)** tracker-domain-to-media-type rules, **(3)** filename regex and UHD markers, **(4)** per-node destination overrides. The resulting staging command is read live from the classification response on every run — change it in Settings and every node picks it up immediately, no script redeploy needed.
+On every completed torrent, from any daemon: **(1)** exact match against active Sonarr/Radarr/Lidarr grabs, **(2)** tracker-domain-to-media-type rules, **(3)** filename regex and UHD markers, **(4)** per-node destination overrides. The resulting staging command is read live from the classification response on every run — change it in Settings and every node picks it up immediately, no script redeploy needed.
 
 ### 🐕 4. Conduit's Scent Trail & Pipeline Browser
 A dedicated view of everything moving through the pipeline — poster art, clean titles, quality tags, and status badges (`🦴 Sniffed` → `🐾 Fetching` → `🎾 Staged` → `🏆 Retrieved`) — updated live over WebSocket, not by polling.
@@ -117,13 +119,16 @@ Link your Plex account once via the same PIN-based device-linking flow Ombi uses
 ### 📊 7. Live Telemetry & Real-Time WebSocket Channels
 Beyond REST polling, Conduit pushes updates over a single WebSocket connection: torrent/cluster stats every second, and dedicated channels for pipeline changes, the audit log, Arr ecosystem stats, and background-engine health — published the instant something changes, not on a fixed timer.
 
-### 🩺 8. Platform Health — Background Engine Visibility
+### 📈 8. Cluster Stats, Breakdowns & Historical Trends
+A dedicated Stats page: live totals (torrents, size, seeders/leechers, aggregate throughput) plus breakdowns by fetcher node, tracker, and media type — all computed from data the poller already has, at zero extra network cost. 24h/7d/30d trend charts track those totals over time, and a periodically-sampled breakdown shows which remote peer clients (qBittorrent, Transmission, Deluge, and friends) are actually connecting to your swarms.
+
+### 🩺 9. Platform Health — Background Engine Visibility
 Every background engine (the fetcher poller, space manager, circuit breaker, file sync, Arr sync, watch-history sync, Arr stats poller, and more) reports its live state, last heartbeat, and restart count. A panicking engine is automatically restarted with backoff — and you can see it happen, instead of it failing silently.
 
-### 🗺️ 9. Space Management & Auto-Purge
+### 🗺️ 10. Space Management & Auto-Purge
 Per-node free-space thresholds (never aggregated across nodes) trigger automatic cleanup of well-seeded, sufficiently-aged torrents — configurable ratio/age/seeder-count criteria, largest-reclaim-first, stopping as soon as the deficit clears.
 
-### 🔒 10. Enterprise Security
+### 🔒 11. Enterprise Security
 2FA (TOTP/RFC 6238) with QR setup, Argon2id password hashing, JWT sessions, SQLCipher 256-bit AES-GCM full-database encryption with live passphrase rekeying, scoped API tokens, and encrypted AES-256-GCM configuration backups.
 
 ---
@@ -145,6 +150,8 @@ Per-node free-space thresholds (never aggregated across nodes) trigger automatic
 | **Mattermost / Discord / Generic Webhooks** | ✅ Rich card notifications for every lifecycle event |
 | **Prometheus** | ✅ `/metrics` scrape endpoint (bearer token required; set `system.metrics_public = true` to scrape without one) |
 | **InfluxDB v2** | ✅ Cluster telemetry line-protocol pusher |
+
+Every fetcher backend above speaks the same internal `TorrentClientTrait` — add, remove, migrate, start/stop, classify, and report telemetry all work identically regardless of which daemon is actually running underneath. New backends plug in as a new driver crate, not a UI rewrite.
 
 **Multi-tenant "zones"** (0.8.0+): run fully independent stacks side by side — e.g. a general library and a separate 4K library, each with its own Sonarr/Radarr/Lidarr instance and a subset of your Plex servers and fetcher nodes — with both a combined view and a per-zone view (sidebar switcher, zone-scoped webhook URLs, per-zone grab history, per-zone live Sonarr/Radarr telemetry). Purely opt-in: with no zones configured, Conduit behaves exactly as a single-instance setup.
 
@@ -176,7 +183,7 @@ Run:
 ```bash
 docker compose up -d
 ```
-Access the web UI at `http://localhost:4242`.
+Access the web UI at `http://localhost:4242`, then add your first fetcher node (any supported daemon) from Settings.
 
 ---
 
@@ -202,23 +209,22 @@ cargo test
 
 ---
 
-## 🔌 Fetcher Intake Hook Integration (`copy2queue.py`)
+## 🔌 Fetcher Done-Hook Integration
 
-Download your pre-configured intake hook script directly from Conduit. The endpoint needs a
-credential (an API token from Settings → API Tokens works well, and is the same one the hook
-sends back to Conduit at runtime):
+Download your pre-configured done-hook script directly from Conduit's Settings → Sync page, or via the API — it's generated for whichever shell/interpreter you need (`sh`, `py`, `pl`) and can auto-embed your API key, Conduit URL, and node name so it works with zero extra configuration on the fetcher side. The endpoint needs a credential (an API token from Settings → API Tokens works well, and is the same one the hook sends back to Conduit at runtime):
 ```bash
-# Download Python hook
 curl -s -H "Authorization: Bearer $CONDUIT_API_KEY" \
-  "http://localhost:4242/api/sync/hook-script?format=py" -o /usr/local/bin/copy2queue.py
-chmod +x /usr/local/bin/copy2queue.py
+  "http://localhost:4242/api/sync/hook-script?format=py" -o /usr/local/bin/conduit-hook.py
+chmod +x /usr/local/bin/conduit-hook.py
 ```
 
-For Transmission's `settings.json`:
+Point your daemon's own "torrent finished" hook at it — for example, Transmission's `settings.json`:
 ```json
 "script-torrent-done-enabled": true,
-"script-torrent-done-filename": "/usr/local/bin/copy2queue.py"
+"script-torrent-done-filename": "/usr/local/bin/conduit-hook.py"
 ```
+
+qBittorrent and Deluge expose the equivalent setting under their own "run external program on torrent completion" option.
 
 The script queries Conduit's classification API on every completed download and executes whatever staging command is currently configured — falling back to sensible local heuristics if Conduit is temporarily unreachable, so downloads never get stuck waiting on the daemon.
 
@@ -254,6 +260,7 @@ Interactive Swagger documentation is available at **`http://localhost:4242/swagg
 | | `DELETE` | `/api/torrents/{compound_id}` | Delete torrent (optional data purge) |
 | | `POST` | `/api/torrents/{compound_id}/location` | Move torrent download directory |
 | | `POST` | `/api/torrents/{compound_id}/enrich` | Match and enrich metadata via Sonarr/Radarr/Lidarr |
+| | `POST` | `/api/torrents/migrate` | Move a torrent from one fetcher node to another |
 | | `POST` | `/api/torrents/bulk` | Bulk action (`start`, `stop`, `delete`, `move`) |
 | **Nodes** | `GET` | `/api/nodes` | List fetcher nodes & connectivity |
 | | `GET`/`PUT` | `/api/nodes/{name}/session` | Fetcher session settings |
@@ -271,10 +278,13 @@ Interactive Swagger documentation is available at **`http://localhost:4242/swagg
 | | `POST` | `/api/ombi/inbound` | Ombi request/issue webhook intake |
 | **Queue Routing** | `GET` | `/api/sync/routes` | Active routing table & UHD markers |
 | | `POST` | `/api/sync/classify` | Classify release into destination queue |
-| | `GET` | `/api/sync/hook-script` | Generate copy2queue script (sh, py, pl) |
+| | `GET` | `/api/sync/hook-script` | Generate the fetcher done-hook script (sh, py, pl) |
 | **Settings** | `GET`/`PUT` | `/api/settings` | Get / update system configuration |
 | | `POST` | `/api/settings/backup` \| `/restore` | Encrypted AES-GCM backup export/import |
 | | `POST` | `/api/settings/rekey-db` | Rekey SQLCipher database passphrase |
+| **Stats** | `GET` | `/api/stats/current` | Live cluster totals & breakdowns (node/tracker/media type) |
+| | `GET` | `/api/stats/history` | Historical stats snapshots (trend charts) |
+| | `GET` | `/api/stats/peer-clients/history` | Sampled remote peer-client breakdown history |
 | **Telemetry** | `GET` | `/metrics` | Prometheus metrics endpoint |
 | | `GET` | `/api/system/stats` | Hardware CPU/Memory/Disk stats |
 | | `GET` | `/api/system/health` | Fetcher node & tracker circuit-breaker health |

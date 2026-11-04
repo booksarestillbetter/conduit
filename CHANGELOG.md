@@ -11,6 +11,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.2] - 2026-11-04
+
+### Changed
+
+- **Full-library Transmission refreshes now resume progressively instead of fetching everything in one pass.** The id-prefetch introduced in 0.20.1 now also grabs cheap activity fields (`status`, `rateDownload`, `rateUpload`) and sorts actively-transferring torrents to the front of the sweep. Each poll tick advances the sweep by one batch (still 300 torrents) and merges it into the live mirror immediately, rather than looping through every batch before returning anything — so a large library's actively-downloading/seeding torrents are fresh within the first tick, and the rest fill in over the next few seconds instead of the UI waiting on the whole sweep. A failed batch keeps its place in the queue and is retried next tick rather than restarting the sweep from scratch. Delta polling (the common steady-state path) is paused only while a sweep is actively draining.
+
+---
+
+## [0.20.1] - 2026-11-04
+
+### Changed
+
+- **Optimized Transmission RPC connectivity for large libraries.** The periodic full-library refresh (previously one `torrent-get` request for every torrent, all fields, in a single response) now fetches a lightweight id-only list first, then pulls full torrent data in bounded batches of 300 by id — a single giant response was the most likely thing to stall or get cut off mid-transfer on a busy daemon with a large library; batching keeps each response small, and a failed batch no longer costs re-fetching torrents that already came back fine. The RPC client also now negotiates gzip compression, shrinking the JSON payload for large libraries substantially. Delta polling (the common steady-state case) is unchanged.
+- **Reframed the README** around Conduit being a generic multi-daemon control plane rather than a Transmission-centric tool — the feature comparison now contrasts against "a daemon's own bundled Web UI" instead of singling out one Transmission desktop client, and documented the new Stats page and its endpoints.
+
+---
+
+## [0.20.0] - 2026-11-04
+
+### Added
+
+- **A new Stats page**, showing cluster-wide totals (torrents, size, seeders/leechers, aggregate throughput), historical trend charts (24h/7d/30d), and breakdowns by fetcher node, tracker, media type, and remote peer client. The live totals and fetcher/tracker/media-type breakdowns are computed from data already pulled in by the regular poll cycle, at no extra network cost; the remote-peer-client breakdown is sampled separately, roughly every 15 minutes from each node's most active torrents, since the regular poll doesn't fetch peer lists and a full per-torrent sweep wouldn't scale with library size. History is kept for 30 days.
+
+---
+
 ## [0.19.1] - 2026-10-29
 
 ### Security
