@@ -44,15 +44,16 @@ pub async fn run_poller_loop(config_mgr: ConfigManager, pool: Arc<FetcherPool>, 
 
         // Periodic heartbeat log every ~60s (120 * 500ms)
         if poll_cycle_count.is_multiple_of(120) {
-            let stats = pool.get_aggregate_stats();
+            let (connected_nodes, total_nodes, total_torrents, total_download_speed, total_upload_speed, total_size_bytes) =
+                pool.get_scalar_totals();
             let msg = format!(
                 "Cluster Telemetry: {}/{} nodes connected, {} total torrents (↓ {:.1} MB/s, ↑ {:.1} MB/s, Total: {:.2} TB)",
-                stats.connected_nodes,
-                stats.total_nodes,
-                stats.total_torrents,
-                (stats.total_download_speed as f64) / (1024.0 * 1024.0),
-                (stats.total_upload_speed as f64) / (1024.0 * 1024.0),
-                (stats.total_size_bytes as f64) / (1024.0 * 1024.0 * 1024.0 * 1024.0),
+                connected_nodes,
+                total_nodes,
+                total_torrents,
+                (total_download_speed as f64) / (1024.0 * 1024.0),
+                (total_upload_speed as f64) / (1024.0 * 1024.0),
+                (total_size_bytes as f64) / (1024.0 * 1024.0 * 1024.0 * 1024.0),
             );
             let _ = db.log_event("poller", "info", &msg, None);
 

@@ -1,5 +1,5 @@
 // src/api/node_routes.rs
-use crate::auth::RequireAuth;
+use crate::auth::{RequireRead, RequireTorrentsWrite};
 use crate::fetcher::{NodeStats, FetcherPool};
 use axum::{
     extract::{Path, State},
@@ -22,7 +22,7 @@ use std::sync::Arc;
     )
 )]
 pub async fn list_nodes(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(pool): State<Arc<FetcherPool>>,
 ) -> Json<Vec<NodeStats>> {
     let stats = pool.get_aggregate_stats();
@@ -41,7 +41,7 @@ pub async fn list_nodes(
     )
 )]
 pub async fn get_node_capabilities(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(pool): State<Arc<FetcherPool>>,
 ) -> Json<HashMap<String, fetcher_core::NodeCapabilities>> {
     Json(pool.all_node_capabilities())
@@ -63,7 +63,7 @@ pub async fn get_node_capabilities(
     )
 )]
 pub async fn get_node_session(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(pool): State<Arc<FetcherPool>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -71,7 +71,7 @@ pub async fn get_node_session(
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "Node not found"}))))?;
 
     let session = client.get_session().await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        .map_err(|e| crate::api::op_error::op_failure(&e))?;
 
     Ok(Json(session))
 }
@@ -102,7 +102,7 @@ pub async fn update_node_session(
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "Node not found"}))))?;
 
     client.set_session(settings).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        .map_err(|e| crate::api::op_error::op_failure(&e))?;
 
     Ok(Json(json!({"message": "Node session updated"})))
 }
@@ -124,7 +124,7 @@ pub async fn update_node_session(
     )
 )]
 pub async fn test_node_port(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(pool): State<Arc<FetcherPool>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -157,7 +157,7 @@ pub struct TurtleModePayload {
     )
 )]
 pub async fn set_turtle_mode(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Path(name): Path<String>,
     Json(payload): Json<TurtleModePayload>,
@@ -185,19 +185,25 @@ pub async fn set_turtle_mode(
     )
 )]
 pub async fn set_turtle_mode_all(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Json(payload): Json<TurtleModePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let mut updated = Vec::new();
+    let mut errors = Vec::new();
     for client in pool.get_all_clients() {
-        if client.set_turtle_mode(payload.enabled).await.is_ok() {
-            updated.push(client.node_name().to_string());
+        match client.set_turtle_mode(payload.enabled).await {
+            Ok(()) => updated.push(client.node_name().to_string()),
+            Err(e) => errors.push(json!({
+                "node": client.node_name(),
+                "error": e.to_string(),
+            })),
         }
     }
 
     Ok(Json(json!({
         "updated_nodes": updated,
+        "errors": errors,
         "alt_speed_enabled": payload.enabled
     })))
 }
@@ -217,7 +223,7 @@ pub async fn set_turtle_mode_all(
     )
 )]
 pub async fn update_node_blocklist(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {

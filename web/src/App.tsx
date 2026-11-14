@@ -26,7 +26,7 @@ const PageLoadingFallback: React.FC = () => (
     <span className="text-sm font-medium">Loading...</span>
   </div>
 );
-import { useTelemetry } from './hooks/useTelemetry';
+import { useTelemetry, clearTelemetryCache } from './hooks/useTelemetry';
 import {
   fetchSetupStatus,
   fetchHealth,
@@ -309,6 +309,7 @@ export const App: React.FC = () => {
 
   const handleLogout = async () => {
     await logout();
+    clearTelemetryCache();
     setUser(null);
     toast.info('Logged out of Conduit', 'Session Ended');
   };

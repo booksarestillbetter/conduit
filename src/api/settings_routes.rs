@@ -1,5 +1,5 @@
 // src/api/settings_routes.rs
-use crate::auth::RequireAdmin;
+use crate::auth::{AppState, RequireAdmin};
 use crate::config::{
     create_backup_bundle, restore_backup_bundle, AppConfig, BackupBundle, BackupExportRequest,
     BackupRestoreRequest, ConfigManager,
@@ -23,7 +23,7 @@ pub async fn get_settings(
     _admin: RequireAdmin,
     State(config_mgr): State<ConfigManager>,
 ) -> Json<AppConfig> {
-    Json(config_mgr.get().await)
+    Json(config_mgr.get().await.redacted())
 }
 
 #[utoipa::path(
@@ -43,8 +43,13 @@ pub async fn update_settings(
     State(config_mgr): State<ConfigManager>,
     Json(mut new_config): Json<AppConfig>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if let Err(msg) = crate::engines::file_sync::validate_sync_cmd(&new_config.file_sync.sync_cmd) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": msg}))));
+    }
+    let prev = config_mgr.get().await;
+    new_config.restore_redacted_secrets(&prev);
     // A settings page opened before a Trakt token refresh must not put the old tokens back.
-    crate::trakt_client::keep_newer_tokens(&config_mgr.get().await.trakt, &mut new_config.trakt);
+    crate::trakt_client::keep_newer_tokens(&prev.trakt, &mut new_config.trakt);
     config_mgr.update(new_config).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
 
@@ -164,4 +169,15 @@ pub async fn purge_history_now(
     })?;
 
     Ok(Json(crate::engines::retention::run_purge(&db, days)))
+}
+
+pub async fn run_offsite_backup_now(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+) -> Result<Json<crate::engines::backup::OffsiteBackupResult>, (StatusCode, Json<serde_json::Value>)> {
+    let cfg = state.config.get().await;
+    crate::engines::backup::run_offsite_backup_once(&cfg)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))
 }

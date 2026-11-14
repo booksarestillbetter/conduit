@@ -205,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
     let arr_stats_cache = engines::arr_stats_poller::new_cache();
     let engine_registry = engines::registry::new_registry();
     let ip_asn_db = ip_asn::new_cache();
+    let hardlink_cache = engines::hardlink_checker::HardlinkCache::default();
 
     // 5. Build Shared AppState
     let state = AppState {
@@ -219,10 +220,12 @@ async fn main() -> anyhow::Result<()> {
         engine_registry: engine_registry.clone(),
         event_bus: event_bus.clone(),
         ip_asn_db: ip_asn_db.clone(),
+        hardlink_cache: hardlink_cache.clone(),
+        oidc_states: auth::oidc::OidcStateStore::default(),
     };
 
     // 6. Launch Background Engine Supervisor
-    engines::start_all_engines(config_mgr.clone(), fetcher_pool.clone(), db.clone(), notifiers, arr_stats_cache, ip_asn_db, engine_registry, event_bus);
+    let engine_shutdown_tx = engines::start_all_engines(config_mgr.clone(), fetcher_pool.clone(), db.clone(), notifiers, arr_stats_cache, ip_asn_db, hardlink_cache, engine_registry, event_bus);
     info!("Background worker engines started successfully");
 
     // 7. Build API & Web Routers
@@ -242,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
     let handle_clone = handle.clone();
     tokio::spawn(async move {
         shutdown_signal().await;
+        let _ = engine_shutdown_tx.send(true);
         handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
     });
 
@@ -254,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
 
             axum_server::bind_rustls(addr, rustls_config)
                 .handle(handle)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         } else {
             warn!("⚠️ SSL enabled in configuration but missing certificate or private key paths! Falling back to standard HTTP.");
@@ -263,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
 
             axum_server::bind(addr)
                 .handle(handle)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         }
     } else {
@@ -272,7 +276,7 @@ async fn main() -> anyhow::Result<()> {
 
         axum_server::bind(addr)
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await?;
     }
 

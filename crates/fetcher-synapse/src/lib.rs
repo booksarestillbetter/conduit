@@ -165,10 +165,14 @@ impl SynapseClient {
 
     /// Resolves a requested batch of `i64` ids back to hex info-hashes.
     fn resolve_hashes(&self, ids: &[i64]) -> anyhow::Result<Vec<String>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let id_set: std::collections::HashSet<i64> = ids.iter().copied().collect();
         let summaries = self.snapshot()?;
         Ok(summaries
             .into_iter()
-            .filter(|s| ids.contains(&Self::hash_to_id(&s.hash)))
+            .filter(|s| id_set.contains(&Self::hash_to_id(&s.hash)))
             .map(|s| s.hash)
             .collect())
     }
@@ -455,12 +459,6 @@ impl TorrentClientTrait for SynapseClient {
         Ok(())
     }
 
-    // Synapse's gRPC surface (its canonical `synapse-proto/proto/synapse.proto`)
-    // has no RPC for queue position, sequential download, path renaming, or tracker
-    // replacement -- there is nothing to call for any of these four, on any Synapse
-    // daemon version. Returning a clear "unsupported" error is honest about that; the
-    // previous `Ok(())`/fabricated-success-JSON behavior looked identical, from the
-    // caller's side, to the operation having actually happened.
     async fn queue_move(&self, ids: &[i64], direction: &str) -> anyhow::Result<()> {
         let hashes = self.resolve_hashes(ids)?;
         let resp = self

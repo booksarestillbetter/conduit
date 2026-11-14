@@ -26,7 +26,8 @@ pub async fn run_retention_loop(config_mgr: ConfigManager, db: Database, handle:
     loop {
         let config = config_mgr.get().await;
         if let Some(days) = config.system.history_retention_days.filter(|d| *d > 0) {
-            run_purge(&db, days);
+            let db_clone = db.clone();
+            let _ = tokio::task::spawn_blocking(move || run_purge(&db_clone, days)).await;
         }
         heartbeat_sleep(&handle, CHECK_INTERVAL).await;
     }

@@ -116,26 +116,81 @@ impl TorrentClientTrait for DisabledClientAdapter {
     }
 }
 
-pub fn create_client(config: FetcherNodeConfig) -> Arc<dyn TorrentClientTrait> {
-    match config.client_type {
+struct FnDriverFactory<F> {
+    kind: RetrieverClientType,
+    ctor: F,
+}
+
+impl<F> fetcher_core::registry::FetcherDriverFactory for FnDriverFactory<F>
+where
+    F: Fn(FetcherNodeConfig) -> Arc<dyn TorrentClientTrait> + Send + Sync,
+{
+    fn client_type(&self) -> RetrieverClientType {
+        self.kind
+    }
+
+    fn create_client(&self, config: FetcherNodeConfig) -> Arc<dyn TorrentClientTrait> {
+        (self.ctor)(config)
+    }
+}
+
+static DEFAULT_REGISTRY: std::sync::OnceLock<fetcher_core::registry::FetcherRegistry> =
+    std::sync::OnceLock::new();
+
+pub fn default_registry() -> &'static fetcher_core::registry::FetcherRegistry {
+    DEFAULT_REGISTRY.get_or_init(|| {
+        let reg = fetcher_core::registry::FetcherRegistry::new();
+
         #[cfg(feature = "transmission")]
-        RetrieverClientType::Transmission => Arc::new(TransmissionAdapter::new(config)),
+        reg.register(Box::new(FnDriverFactory {
+            kind: RetrieverClientType::Transmission,
+            ctor: |cfg| Arc::new(TransmissionAdapter::new(cfg)) as Arc<dyn TorrentClientTrait>,
+        }));
         #[cfg(not(feature = "transmission"))]
-        RetrieverClientType::Transmission => Arc::new(DisabledClientAdapter::new(config, "transmission")),
+        reg.register(Box::new(FnDriverFactory {
+            kind: RetrieverClientType::Transmission,
+            ctor: |cfg| Arc::new(DisabledClientAdapter::new(cfg, "transmission")) as Arc<dyn TorrentClientTrait>,
+        }));
 
         #[cfg(feature = "qbittorrent")]
-        RetrieverClientType::QBittorrent => Arc::new(QBittorrentClient::new(config)),
+        reg.register(Box::new(FnDriverFactory {
+            kind: RetrieverClientType::QBittorrent,
+            ctor: |cfg| Arc::new(QBittorrentClient::new(cfg)) as Arc<dyn TorrentClientTrait>,
+        }));
         #[cfg(not(feature = "qbittorrent"))]
-        RetrieverClientType::QBittorrent => Arc::new(DisabledClientAdapter::new(config, "qbittorrent")),
+        reg.register(Box::new(FnDriverFactory {
+            kind: RetrieverClientType::QBittorrent,
+            ctor: |cfg| Arc::new(DisabledClientAdapter::new(cfg, "qbittorrent")) as Arc<dyn TorrentClientTrait>,
+        }));
 
         #[cfg(feature = "deluge")]
-        RetrieverClientType::Deluge => Arc::new(DelugeClient::new(config)),
+        reg.register(Box::new(FnDriverFactory {
+            kind: RetrieverClientType::Deluge,
+            ctor: |cfg| Arc::new(DelugeClient::new(cfg)) as Arc<dyn TorrentClientTrait>,
+        }));
         #[cfg(not(feature = "deluge"))]
-        RetrieverClientType::Deluge => Arc::new(DisabledClientAdapter::new(config, "deluge")),
+        reg.register(Box::new(FnDriverFactory {
+            kind: RetrieverClientType::Deluge,
+            ctor: |cfg| Arc::new(DisabledClientAdapter::new(cfg, "deluge")) as Arc<dyn TorrentClientTrait>,
+        }));
 
         #[cfg(feature = "synapse")]
-        RetrieverClientType::Synapse => Arc::new(SynapseClient::new(config)),
+        reg.register(Box::new(FnDriverFactory {
+            kind: RetrieverClientType::Synapse,
+            ctor: |cfg| Arc::new(SynapseClient::new(cfg)) as Arc<dyn TorrentClientTrait>,
+        }));
         #[cfg(not(feature = "synapse"))]
-        RetrieverClientType::Synapse => Arc::new(DisabledClientAdapter::new(config, "synapse")),
-    }
+        reg.register(Box::new(FnDriverFactory {
+            kind: RetrieverClientType::Synapse,
+            ctor: |cfg| Arc::new(DisabledClientAdapter::new(cfg, "synapse")) as Arc<dyn TorrentClientTrait>,
+        }));
+
+        reg
+    })
+}
+
+pub fn create_client(config: FetcherNodeConfig) -> Arc<dyn TorrentClientTrait> {
+    default_registry()
+        .create_client(config.clone())
+        .unwrap_or_else(|_| Arc::new(DisabledClientAdapter::new(config, "unknown")))
 }

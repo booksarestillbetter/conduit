@@ -8,7 +8,6 @@ use axum::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::Duration;
 use utoipa::ToSchema;
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -74,10 +73,15 @@ pub async fn test_plex_connection(
     _admin: RequireAdmin,
     Json(req): Json<PlexTestRequest>,
 ) -> Result<Json<IntegrationTestResponse>, StatusCode> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Err(msg) = crate::api::validate_integration_url(&req.url) {
+        return Ok(Json(IntegrationTestResponse {
+            success: false,
+            message: msg.to_string(),
+            server_name: None,
+            version: None,
+        }));
+    }
+    let client = crate::api::shared_http_client();
 
     let identity_url = format!("{}/identity", req.url.trim_end_matches('/'));
     match client
@@ -137,10 +141,10 @@ pub async fn refresh_plex_sections(
     _admin: RequireAdmin,
     Json(req): Json<PlexRefreshRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Failed to create client"}))))?;
+    if let Err(msg) = crate::api::validate_integration_url(&req.url) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": msg}))));
+    }
+    let client = crate::api::shared_http_client();
 
     let refresh_url = format!("{}/library/sections/all/refresh", req.url.trim_end_matches('/'));
     match client
@@ -173,10 +177,7 @@ pub async fn test_trakt_connection(
     _admin: RequireAdmin,
     Json(req): Json<TraktTestRequest>,
 ) -> Result<Json<IntegrationTestResponse>, StatusCode> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let client = crate::api::shared_http_client();
 
     let mut request = client
         .get("https://api.trakt.tv/users/settings")

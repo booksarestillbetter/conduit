@@ -48,6 +48,12 @@ pub fn build_api_router(state: AppState) -> Router {
         .route("/api/auth/ws-ticket", post(auth_routes::issue_ws_ticket))
         .route("/api/auth/mobile/pair-token", post(auth_routes::create_mobile_pair_token))
         .route("/api/auth/mobile/pair", post(auth_routes::redeem_mobile_pair))
+        .route("/api/auth/oidc/config", get(auth_routes::get_oidc_config))
+        .route("/api/auth/oidc/login", get(auth_routes::oidc_login))
+        .route("/api/auth/oidc/callback", get(auth_routes::oidc_callback))
+        .route("/api/auth/users", get(auth_routes::list_users).post(auth_routes::create_user_admin))
+        .route("/api/auth/users/{id}/role", put(auth_routes::update_user_role_admin))
+        .route("/api/auth/users/{id}", delete(auth_routes::delete_user_admin))
 
         // Fetchers / Torrents
         .route("/api/torrents", get(torrent_routes::list_torrents).post(torrent_routes::add_torrent))
@@ -82,6 +88,7 @@ pub fn build_api_router(state: AppState) -> Router {
         // Settings & Backups
         .route("/api/settings", get(settings_routes::get_settings).put(settings_routes::update_settings))
         .route("/api/settings/backup", post(settings_routes::export_backup))
+        .route("/api/settings/backup/offsite", post(settings_routes::run_offsite_backup_now))
         .route("/api/settings/restore", post(settings_routes::restore_backup))
         .route("/api/settings/rekey-db", post(settings_routes::rekey_database))
         .route("/api/settings/purge-history", post(settings_routes::purge_history_now))
@@ -168,9 +175,52 @@ pub fn build_api_router(state: AppState) -> Router {
         .route("/api/system/circuit-breakers/{host}/reset", post(metrics_routes::force_reset_circuit_breaker))
         .route("/api/system/engines", get(metrics_routes::get_engine_health))
         .route("/api/system/crash-log", get(metrics_routes::get_crash_log))
+        .route("/api/system/hardlinks", get(metrics_routes::get_hardlink_health))
+        .route("/api/system/hardlinks/scan", post(metrics_routes::scan_hardlinks_now))
 
         // Realtime WebSocket
         .route("/api/ws", get(ws::ws_handler))
 
         .with_state(state)
+}
+
+static SHARED_HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+/// Process-wide pooled HTTP client for outbound Arr/Plex/Trakt/notification requests.
+/// Callers can override the default 15s timeout per request with `.timeout(...)`.
+pub fn shared_http_client() -> &'static reqwest::Client {
+    SHARED_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(16)
+            .build()
+            .expect("failed to construct shared reqwest::Client")
+    })
+}
+
+/// Validates user-supplied integration URLs (Arr, Plex, etc.):
+/// - Requires `http` or `https` scheme and a non-empty host.
+/// - Blocks link-local / cloud metadata endpoints (`169.254.0.0/16`, `fe80::/10`,
+///   `0.0.0.0`, `metadata.google.internal`) while preserving homelab RFC1918/loopback hosts.
+pub fn validate_integration_url(raw: &str) -> Result<reqwest::Url, &'static str> {
+    let url = reqwest::Url::parse(raw.trim()).map_err(|_| "Invalid URL")?;
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => return Err("URL scheme must be http or https"),
+    }
+    let host = url.host_str().ok_or("URL missing host")?.to_ascii_lowercase();
+    if host == "metadata.google.internal" || host == "0.0.0.0" || host == "::" {
+        return Err("Host is not allowed");
+    }
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        let blocked = match ip {
+            std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.is_unspecified(),
+            std::net::IpAddr::V6(v6) => v6.is_unicast_link_local() || v6.is_unspecified(),
+        };
+        if blocked {
+            return Err("Link-local and unspecified IP addresses are not allowed");
+        }
+    }
+    Ok(url)
 }

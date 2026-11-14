@@ -314,14 +314,22 @@ impl TorrentClientTrait for QBittorrentClient {
     }
 
     async fn get_torrent_details_by_hash(&self, hash: &str) -> anyhow::Result<Torrent> {
-        let resp = self.send_api_get("/api/v2/torrents/info", &[("hashes", hash)]).await?;
+        let q_hashes = [("hashes", hash)];
+        let q_hash = [("hash", hash)];
+        let (info_res, files_res, pieces_res, peers_res) = tokio::join!(
+            self.send_api_get("/api/v2/torrents/info", &q_hashes),
+            self.send_api_get("/api/v2/torrents/files", &q_hash),
+            self.send_api_get("/api/v2/torrents/pieceStates", &q_hash),
+            self.send_api_get("/api/v2/sync/torrent_peers", &q_hash),
+        );
+        let resp = info_res?;
         let items: Vec<QbitTorrentItem> = resp.json().await.unwrap_or_default();
         let item = items.into_iter().next().ok_or_else(|| anyhow::anyhow!("Torrent {} not found", hash))?;
 
         let mut torrent = self.map_qbit_to_torrent(item, 1);
 
         // Fetch detailed files list
-        if let Ok(files_resp) = self.send_api_get("/api/v2/torrents/files", &[("hash", hash)]).await {
+        if let Ok(files_resp) = files_res {
             if let Ok(files_json) = files_resp.json::<Vec<serde_json::Value>>().await {
                 let mut files = Vec::with_capacity(files_json.len());
                 for f in files_json {
@@ -336,9 +344,9 @@ impl TorrentClientTrait for QBittorrentClient {
         }
 
         // Fetch piece states if available
-        if let Ok(pieces_resp) = self.send_api_get("/api/v2/torrents/pieceStates", &[("hash", hash)]).await {
+        if let Ok(pieces_resp) = pieces_res {
             if let Ok(pieces_arr) = pieces_resp.json::<Vec<i64>>().await {
-                let mut pieces_b64 = String::new();
+                let mut pieces_b64 = String::with_capacity(pieces_arr.len());
                 for state in pieces_arr {
                     pieces_b64.push(if state == 2 { '1' } else { '0' });
                 }
@@ -347,7 +355,7 @@ impl TorrentClientTrait for QBittorrentClient {
         }
 
         // Fetch connected peers list from qBittorrent /sync/torrent_peers
-        if let Ok(peers_resp) = self.send_api_get("/api/v2/sync/torrent_peers", &[("hash", hash)]).await {
+        if let Ok(peers_resp) = peers_res {
             if let Ok(peers_json) = peers_resp.json::<serde_json::Value>().await {
                 if let Some(peers_obj) = peers_json.get("peers").and_then(|p| p.as_object()) {
                     let mut peer_list = Vec::with_capacity(peers_obj.len());

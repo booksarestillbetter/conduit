@@ -1,5 +1,5 @@
 // src/api/sync_routes.rs
-use crate::auth::RequireAuth;
+use crate::auth::{RequireAdmin, RequireRead, RequireSync};
 use crate::config::{ConfigManager, MediaTypeDefinition, QueueRoutingConfig, TrackerMappingRule};
 use crate::db::{Database, EventLogRecord};
 use axum::{
@@ -206,7 +206,7 @@ pub struct NotifyDownloadPayload {
     )
 )]
 pub async fn get_events(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(db): State<Database>,
     Query(params): Query<EventQueryParams>,
 ) -> Result<Json<Vec<EventLogRecord>>, StatusCode> {
@@ -231,7 +231,7 @@ pub async fn get_events(
     )
 )]
 pub async fn get_queue_routes(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(config_mgr): State<ConfigManager>,
 ) -> Json<QueueRoutingConfig> {
     let config = config_mgr.get().await;
@@ -277,7 +277,7 @@ fn extract_tracker_host(raw: &str) -> String {
     )
 )]
 pub async fn classify_file(
-    _auth: crate::auth::RequireAuth,
+    _auth: RequireSync,
     State(config_mgr): State<ConfigManager>,
     State(db): State<Database>,
     Json(payload): Json<ClassifyFilePayload>,
@@ -529,7 +529,7 @@ pub async fn classify_file(
     )
 )]
 pub async fn notify_download(
-    _auth: RequireAuth,
+    _auth: RequireSync,
     State(config_mgr): State<ConfigManager>,
     State(db): State<Database>,
     Json(payload): Json<NotifyDownloadPayload>,
@@ -646,7 +646,7 @@ pub async fn notify_download(
     )
 )]
 pub async fn get_tracker_mappings(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(config_mgr): State<ConfigManager>,
 ) -> Json<Vec<TrackerMappingRule>> {
     let config = config_mgr.get().await;
@@ -665,7 +665,7 @@ pub async fn get_tracker_mappings(
     )
 )]
 pub async fn save_tracker_mappings(
-    _auth: RequireAuth,
+    _auth: RequireAdmin,
     State(config_mgr): State<ConfigManager>,
     Json(rules): Json<Vec<TrackerMappingRule>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -686,7 +686,7 @@ pub async fn save_tracker_mappings(
     )
 )]
 pub async fn get_media_types(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(config_mgr): State<ConfigManager>,
 ) -> Json<Vec<MediaTypeDefinition>> {
     let config = config_mgr.get().await;
@@ -705,7 +705,7 @@ pub async fn get_media_types(
     )
 )]
 pub async fn save_media_types(
-    _auth: RequireAuth,
+    _auth: RequireAdmin,
     State(config_mgr): State<ConfigManager>,
     Json(types): Json<Vec<MediaTypeDefinition>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -731,7 +731,7 @@ pub async fn save_media_types(
     )
 )]
 pub async fn update_node_media_overrides(
-    _auth: RequireAuth,
+    _auth: RequireAdmin,
     State(config_mgr): State<ConfigManager>,
     Path(node_name): Path<String>,
     Json(overrides): Json<HashMap<String, String>>,
@@ -781,7 +781,7 @@ pub struct HookScriptQueryParams {
     )
 )]
 pub async fn get_hook_script(
-    _auth: crate::auth::RequireAuth,
+    _auth: RequireRead,
     Query(params): Query<HookScriptQueryParams>,
     State(config_mgr): State<ConfigManager>,
 ) -> axum::response::Response {

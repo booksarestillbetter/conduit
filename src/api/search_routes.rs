@@ -5,7 +5,7 @@
 //! Plex watch / Ombi request / grab records. Lidarr isn't wired in yet — `arr_nodes`/`lookup_all`
 //! below are written so adding it is one more call site, not new plumbing.
 
-use crate::auth::{AppState, RequireAuth};
+use crate::auth::{AppState, RequireRead};
 use crate::config::ArrNodeConfig;
 use axum::extract::{Query, State};
 use axum::Json;
@@ -105,7 +105,7 @@ pub struct UniversalSearchResponse {
     )
 )]
 pub async fn universal_search(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(state): State<AppState>,
     Query(params): Query<UniversalSearchQuery>,
 ) -> Json<UniversalSearchResponse> {

@@ -195,6 +195,7 @@ export interface UserRecord {
   id: string;
   username: string;
   is_admin: boolean;
+  role?: 'admin' | 'operator' | 'requester' | 'viewer' | string;
   totp_enabled?: boolean;
   created_at: string;
 }
@@ -645,6 +646,78 @@ export interface AppConfig {
   zones?: ZoneConfig[];
   influx: InfluxConfig;
   ip_asn: IpAsnConfig;
+  hardlink_checker?: HardlinkCheckerConfig;
+  oidc?: OidcConfig;
+  offsite_backup?: OffsiteBackupConfig;
+}
+
+export interface HardlinkPairConfig {
+  name: string;
+  source_dir: string;
+  dest_dir: string;
+}
+
+export interface HardlinkCheckerConfig {
+  enabled: boolean;
+  check_interval_secs: number;
+  alert_wasted_mb_threshold: number;
+  extra_pairs: HardlinkPairConfig[];
+}
+
+export interface HardlinkIssue {
+  pair_name: string;
+  path: string;
+  kind: string;
+  size_bytes: number;
+  detail: string;
+}
+
+export interface HardlinkPairStatus {
+  name: string;
+  source_dir: string;
+  dest_dir: string;
+  same_filesystem: boolean;
+  total_dest_files: number;
+  hardlinked_files: number;
+  duplicate_copy_files: number;
+  broken_symlinks: number;
+  wasted_bytes: number;
+}
+
+export interface HardlinkHealthReport {
+  scanned_at: string | null;
+  total_pairs: number;
+  total_dest_files: number;
+  hardlinked_files: number;
+  duplicate_copy_files: number;
+  broken_symlinks: number;
+  wasted_bytes: number;
+  pairs: HardlinkPairStatus[];
+  issues: HardlinkIssue[];
+}
+
+export interface OidcConfig {
+  enabled: boolean;
+  provider_name: string;
+  issuer_url: string;
+  client_id: string;
+  client_secret: string;
+  redirect_url: string;
+  scopes: string;
+  auto_provision_users: boolean;
+  default_role: string;
+  admin_groups: string[];
+}
+
+export interface OffsiteBackupConfig {
+  enabled: boolean;
+  interval_hours: number;
+  retain_count: number;
+  target_type: 'local' | 'webdav' | 's3_http' | string;
+  destination: string;
+  passphrase: string;
+  auth_username: string;
+  auth_secret: string;
 }
 
 export interface InfluxConfig {

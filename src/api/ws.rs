@@ -99,7 +99,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             bus_msg = bus_rx.recv() => {
                 match bus_msg {
                     Ok(evt) if evt.topic == TOPIC_TELEMETRY => {
-                        if let Ok(json_str) = serde_json::to_string(&evt.payload) {
+                        if let Some(ref pre) = evt.pre_serialized {
+                            if sender.send(Message::Text((**pre).clone().into())).await.is_err() {
+                                break;
+                            }
+                        } else if let Ok(json_str) = serde_json::to_string(&evt.payload) {
                             if sender.send(Message::Text(json_str.into())).await.is_err() {
                                 break;
                             }

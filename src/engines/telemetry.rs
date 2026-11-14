@@ -43,8 +43,10 @@ pub fn compute_snapshot(pool: &FetcherPool, db: &Database) -> serde_json::Value 
 
 pub async fn run_telemetry_publisher(pool: Arc<FetcherPool>, db: Database, bus: EventBus, handle: TaskHandle) {
     loop {
-        let snapshot = compute_snapshot(&pool, &db);
-        events::publish(&bus, TOPIC_TELEMETRY, &snapshot);
+        if bus.receiver_count() > 0 {
+            let snapshot = compute_snapshot(&pool, &db);
+            events::publish_pre_serialized(&bus, TOPIC_TELEMETRY, &snapshot);
+        }
         super::registry::heartbeat_sleep(&handle, Duration::from_secs(1)).await;
     }
 }

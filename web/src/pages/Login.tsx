@@ -1,7 +1,7 @@
 // web/src/pages/Login.tsx
-import React, { useState } from 'react';
-import { KeyRound, User, LogIn, Smartphone, ArrowLeft, Loader2 } from 'lucide-react';
-import { login } from '../services/api';
+import React, { useEffect, useState } from 'react';
+import { KeyRound, User, LogIn, Smartphone, ArrowLeft, Loader2, Shield } from 'lucide-react';
+import { getOidcPublicConfig, login } from '../services/api';
 import { UserRecord } from '../types';
 
 interface LoginProps {
@@ -15,6 +15,14 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
   const [requires2Fa, setRequires2Fa] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [oidc, setOidc] = useState<{ enabled: boolean; provider_name: string }>({
+    enabled: false,
+    provider_name: 'SSO',
+  });
+
+  useEffect(() => {
+    getOidcPublicConfig().then(setOidc).catch(() => {});
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -135,6 +143,16 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
             <span>{loading ? 'Verifying...' : requires2Fa ? 'Verify Passcode' : 'Sign In'}</span>
           </button>
+
+          {!requires2Fa && oidc.enabled && (
+            <a
+              href="/api/auth/oidc/login"
+              className="w-full flex items-center justify-center space-x-2 rounded-xl border border-slate-700 bg-slate-800/80 py-2.5 text-sm font-semibold text-slate-200 hover:bg-slate-800 hover:border-brand-500/50 transition-colors mt-3"
+            >
+              <Shield className="h-4 w-4 text-brand-400" />
+              <span>Sign in with {oidc.provider_name || 'SSO'}</span>
+            </a>
+          )}
 
           {requires2Fa && (
             <button

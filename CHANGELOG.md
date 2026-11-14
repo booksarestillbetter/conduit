@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.21.0] - 2026-11-14
+
+### Added
+
+- **Hardlink & Staging Health Checker (`hardlink_checker`)**: Periodically scans `file_sync.mappings` and `hardlink_checker.extra_pairs` using filesystem device/inode/nlink metadata (`dev`, `ino`, `nlink`) to detect cross-device copies, unlinked duplicate copies, broken symlinks, and wasted disk space, with threshold-based notifications, `GET /api/system/hardlinks` + `POST /api/system/hardlinks/scan`, and a new **Hardlinks** tab in System Health.
+- **Multi-User RBAC & OIDC/SSO Login**: Added user roles (`admin`, `operator`, `requester`, `viewer`) enforced across all session/token extractors, admin user management endpoints (`/api/auth/users`, `/api/auth/users/{id}/role`, `/api/auth/users/{id}`), OpenID Connect Discovery + Authorization Code + PKCE (`S256`) login (`/api/auth/oidc/config`, `/api/auth/oidc/login`, `/api/auth/oidc/callback`), a **Sign in with SSO** button on the Login page, and a **Users & SSO** tab in Settings.
+- **Automated Encrypted Off-Site Backups & Monitoring Templates**: Added scheduled AES-256-GCM encrypted config backups (`offsite_backup`) supporting local directory rotation and WebDAV / S3 HTTP `PUT` uploads, an on-demand `POST /api/settings/backup/offsite` trigger + Settings UI controls, and ready-to-import Prometheus & Grafana templates in `deploy/monitoring/`.
+
+### Security
+
+- Hardened webhook secret checks (constant-time comparisons and consistent enforcement across Arr/Plex/Ombi/Overseerr/Bazarr/Jellyfin endpoints), SSRF/URL validation for outbound integrations, sync command executable allowlisting (`ALLOWED_SYNC_EXECUTABLES`), `client_secret` / `passphrase` / `auth_secret` redaction & restoration in `GET/PUT /api/settings`, and API token scope enforcement across routes.
+- **Fixed a login-throttle bypass introduced during this release's own hardening pass**: the new per-IP login rate limiter trusted the client-supplied `X-Forwarded-For` prefix instead of the hop a trusted reverse proxy actually appends, letting a caller spoof an arbitrary apparent source IP and sidestep both the per-account and per-IP lockouts on `POST /api/auth/login`. It now walks the header from the right and takes the first entry that isn't itself another trusted-proxy address.
+
+### Changed
+
+- **Native Rust File-Sync Fast Path**: `file_sync` now performs recursive directory and single-file hardlinking directly via `std::fs::hard_link` (with `std::fs::copy` fallback on cross-device `EXDEV` errors) whenever `sync_cmd` is empty or `cp -al`/`-l`, eliminating per-item `cp` subprocess spawns while preserving custom `rsync`/`rclone` commands.
+- **Performance, Concurrency & Reliability Hardening**: Shared pooled HTTP client (`shared_http_client`), bounded caches and rate-limiter maps, `FetcherPool` / `synapse` tracker-cache optimizations, SQLite connection/locking and supervisor improvements, and frontend telemetry/dashboard optimizations.
 
 ---
 

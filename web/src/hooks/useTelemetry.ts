@@ -23,6 +23,57 @@ const POLL_INTERVAL_CONNECTED_MS = 30000;
 let globalCachedStats: AggregateStats | null = null;
 let globalCachedTorrents: UnifiedTorrent[] = [];
 
+export function clearTelemetryCache() {
+  globalCachedStats = null;
+  globalCachedTorrents = [];
+}
+
+function torrentRowUnchanged(a: UnifiedTorrent, b: UnifiedTorrent): boolean {
+  return (
+    a.status === b.status &&
+    a.raw_status === b.raw_status &&
+    a.rate_download === b.rate_download &&
+    a.rate_upload === b.rate_upload &&
+    a.percent_done === b.percent_done &&
+    a.upload_ratio === b.upload_ratio &&
+    a.uploaded_ever === b.uploaded_ever &&
+    a.downloaded_ever === b.downloaded_ever &&
+    a.peers_connected === b.peers_connected &&
+    a.peers_sending_to_us === b.peers_sending_to_us &&
+    a.peers_getting_from_us === b.peers_getting_from_us &&
+    a.queue_position === b.queue_position &&
+    a.eta === b.eta &&
+    a.error === b.error &&
+    a.error_string === b.error_string &&
+    a.is_canary_probe === b.is_canary_probe &&
+    a.circuit_breaker_reason === b.circuit_breaker_reason &&
+    a.download_dir === b.download_dir &&
+    a.name === b.name &&
+    (a.arr_grab?.id ?? null) === (b.arr_grab?.id ?? null) &&
+    (a.arr_grab?.status ?? null) === (b.arr_grab?.status ?? null)
+  );
+}
+
+function mergeTorrentsPreservingRefs(prev: UnifiedTorrent[], incoming: UnifiedTorrent[]): UnifiedTorrent[] {
+  const prevMap = new Map<string, UnifiedTorrent>();
+  for (const t of prev) {
+    prevMap.set(t.compound_id, t);
+  }
+  let anyChanged = prev.length !== incoming.length;
+  const merged = incoming.map((t, idx) => {
+    const old = prevMap.get(t.compound_id);
+    const nextGrab = t.arr_grab || old?.arr_grab;
+    const candidate = t.arr_grab ? t : (old?.arr_grab ? { ...t, arr_grab: nextGrab } : t);
+    if (old && torrentRowUnchanged(old, candidate)) {
+      if (prev[idx] !== old) anyChanged = true;
+      return old;
+    }
+    anyChanged = true;
+    return candidate;
+  });
+  return anyChanged ? merged : prev;
+}
+
 export function useTelemetry(
   activeNode: string,
   search: string,
@@ -152,14 +203,7 @@ export function useTelemetry(
                 }
 
                 setAllTorrents((prev) => {
-                  const grabMap = new Map<string, any>();
-                  for (const t of prev) {
-                    if (t.arr_grab) grabMap.set(t.compound_id, t.arr_grab);
-                  }
-                  const merged = data.torrents.map((t: UnifiedTorrent) => ({
-                    ...t,
-                    arr_grab: t.arr_grab || grabMap.get(t.compound_id),
-                  }));
+                  const merged = mergeTorrentsPreservingRefs(prev, data.torrents);
                   globalCachedTorrents = merged;
                   return merged;
                 });
@@ -210,14 +254,7 @@ export function useTelemetry(
           }
           if (Array.isArray(tr)) {
             setAllTorrents((prev) => {
-              const grabMap = new Map<string, any>();
-              for (const t of prev) {
-                if (t.arr_grab) grabMap.set(t.compound_id, t.arr_grab);
-              }
-              const merged = tr.map((t: UnifiedTorrent) => ({
-                ...t,
-                arr_grab: t.arr_grab || grabMap.get(t.compound_id),
-              }));
+              const merged = mergeTorrentsPreservingRefs(prev, tr);
               globalCachedTorrents = merged;
               return merged;
             });

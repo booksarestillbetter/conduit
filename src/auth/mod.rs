@@ -2,6 +2,7 @@
 pub mod jwt;
 pub mod middleware;
 pub mod mobile;
+pub mod oidc;
 pub mod rate_limit;
 pub mod totp;
 pub mod ws_ticket;

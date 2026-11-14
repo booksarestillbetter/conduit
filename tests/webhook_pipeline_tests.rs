@@ -38,6 +38,8 @@ async fn test_plex_webhook_json_and_scrobble_listing() {
         ip_asn_db: conduit::ip_asn::new_cache(),
         engine_registry: conduit::engines::registry::new_registry(),
         event_bus: conduit::events::new_bus(),
+        hardlink_cache: Default::default(),
+        oidc_states: Default::default(),
     };
 
     let router = build_api_router(state);
@@ -149,6 +151,8 @@ async fn test_ombi_webhook_and_request_listing() {
         ip_asn_db: conduit::ip_asn::new_cache(),
         engine_registry: conduit::engines::registry::new_registry(),
         event_bus: conduit::events::new_bus(),
+        hardlink_cache: Default::default(),
+        oidc_states: Default::default(),
     };
 
     let router = build_api_router(state);

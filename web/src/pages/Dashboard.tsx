@@ -21,6 +21,7 @@ import { AggregateStats, ArrStats, EventLogRecord, AppConfig, ArrGrabRecord, Sys
 import { fetchEvents, fetchArrStats, triggerArrSyncNow, fetchSettings, fetchPipelineItems, fetchSystemHealth, fetchEngineHealth, fetchBandwidthHistory } from '../services/api';
 import { BandwidthChart, BandwidthDataPoint } from '../components/BandwidthChart';
 import { HealthPanel } from '../components/HealthPanel';
+import { useToast } from '../context/ToastContext';
 
 interface DashboardProps {
   stats: AggregateStats | null;
@@ -82,6 +83,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   // instead, since there's no per-zone WS push.
   useEffect(() => { if (arrStatsProp && !zone) setArrStats(arrStatsProp); }, [arrStatsProp, zone]);
   useEffect(() => { if (enginesProp) setEngines(enginesProp); }, [enginesProp]);
+  const toast = useToast();
   const [syncingApp, setSyncingApp] = useState<string | null>(null);
   const [activityFilter, setActivityFilter] = useState<'all' | 'arr' | 'sync' | 'breaker'>('all');
   const [bandwidthHistory, setBandwidthHistory] = useState<BandwidthDataPoint[]>([]);
@@ -179,7 +181,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       await triggerArrSyncNow(appType);
       loadLiveData();
     } catch (e: any) {
-      alert(`Sync failed: ${e.message}`);
+      toast.error(`Sync failed: ${e.message}`);
     } finally {
       setSyncingApp(null);
     }

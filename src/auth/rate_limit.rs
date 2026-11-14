@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MAX_ATTEMPTS: u32 = 5;
+const MAX_IP_ATTEMPTS: u32 = 25;
 const WINDOW: Duration = Duration::from_secs(15 * 60);
 const LOCKOUT: Duration = Duration::from_secs(15 * 60);
 /// Opportunistic cleanup threshold so a spray of distinct usernames/IPs can't grow this
@@ -62,6 +63,10 @@ impl RateLimiter {
     }
 
     pub fn record_failure(&self, key: &str) {
+        self.record_failure_with_max(key, MAX_ATTEMPTS);
+    }
+
+    pub fn record_failure_with_max(&self, key: &str, max_attempts: u32) {
         let key = Self::normalize(key);
         let mut map = self.inner.lock();
 
@@ -84,7 +89,7 @@ impl RateLimiter {
             rec.window_started = Some(now);
         }
         rec.failures += 1;
-        if rec.failures >= MAX_ATTEMPTS {
+        if rec.failures >= max_attempts {
             rec.locked_until = Some(now + LOCKOUT);
         }
     }
@@ -92,5 +97,32 @@ impl RateLimiter {
     pub fn record_success(&self, key: &str) {
         let key = Self::normalize(key);
         self.inner.lock().remove(&key);
+    }
+
+    /// Check both `(username, ip)` and per-IP rate limits.
+    pub fn check_login(&self, ip: &str, username: &str) -> Result<(), u64> {
+        let pair_key = format!("u:{}|ip:{}", username.trim(), ip.trim());
+        self.check(&pair_key)?;
+        if !ip.trim().is_empty() && ip != "unknown" {
+            let ip_key = format!("ip:{}", ip.trim());
+            self.check(&ip_key)?;
+        }
+        Ok(())
+    }
+
+    /// Record a failed attempt against both `(username, ip)` and per-IP buckets.
+    pub fn record_login_failure(&self, ip: &str, username: &str) {
+        let pair_key = format!("u:{}|ip:{}", username.trim(), ip.trim());
+        self.record_failure_with_max(&pair_key, MAX_ATTEMPTS);
+        if !ip.trim().is_empty() && ip != "unknown" {
+            let ip_key = format!("ip:{}", ip.trim());
+            self.record_failure_with_max(&ip_key, MAX_IP_ATTEMPTS);
+        }
+    }
+
+    /// Clear the `(username, ip)` bucket on successful authentication.
+    pub fn record_login_success(&self, ip: &str, username: &str) {
+        let pair_key = format!("u:{}|ip:{}", username.trim(), ip.trim());
+        self.record_success(&pair_key);
     }
 }

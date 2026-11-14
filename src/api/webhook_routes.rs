@@ -106,7 +106,7 @@ pub async fn plex_inbound(
     body: String,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let config = config_mgr.get().await;
-    if !crate::api::arr_routes::verify_webhook_secret(&headers, Some(&config.plex.token)) {
+    if !crate::api::arr_routes::verify_webhook_secret_headers(&headers, Some(&config.plex.token), &["x-plex-token", "x-webhook-secret"]) {
         return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Plex webhook token"}))));
     }
 
@@ -315,7 +315,7 @@ pub async fn plex_inbound(
     )
 )]
 pub async fn list_plex_scrobbles(
-    _auth: crate::auth::RequireAuth,
+    _auth: crate::auth::RequireRead,
     State(db): State<Database>,
     Query(params): Query<ListScrobblesParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -354,7 +354,7 @@ pub async fn ombi_inbound(
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let config = config_mgr.get().await;
-    if !crate::api::arr_routes::verify_webhook_secret(&headers, config.ombi.webhook_secret.as_deref()) {
+    if !crate::api::arr_routes::verify_webhook_secret_headers(&headers, config.ombi.webhook_secret.as_deref(), &["access-token", "x-webhook-secret"]) {
         return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Ombi webhook secret"}))));
     }
 
@@ -663,7 +663,7 @@ pub async fn ombi_inbound(
     )
 )]
 pub async fn list_ombi_requests(
-    _auth: crate::auth::RequireAuth,
+    _auth: crate::auth::RequireRead,
     State(db): State<Database>,
     Query(params): Query<ListOmbiParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -707,7 +707,7 @@ pub async fn bazarr_inbound(
     body: String,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let config = state.config.get().await;
-    if !crate::api::arr_routes::verify_webhook_secret(&headers, config.bazarr.webhook_secret.as_deref()) {
+    if !crate::api::arr_routes::verify_webhook_secret_headers(&headers, config.bazarr.webhook_secret.as_deref(), &["x-webhook-secret"]) {
         return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Bazarr webhook secret"}))));
     }
 
@@ -766,7 +766,7 @@ pub async fn overseerr_inbound(
     body: String,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let config = state.config.get().await;
-    if !crate::api::arr_routes::verify_webhook_secret(&headers, config.overseerr.webhook_secret.as_deref()) {
+    if !crate::api::arr_routes::verify_webhook_secret_headers(&headers, config.overseerr.webhook_secret.as_deref(), &["x-overseerr-secret", "x-webhook-secret"]) {
         return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Overseerr webhook secret"}))));
     }
 
@@ -856,7 +856,7 @@ pub async fn jellyfin_inbound(
     body: String,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let config = state.config.get().await;
-    if !crate::api::arr_routes::verify_webhook_secret(&headers, config.jellyfin.webhook_secret.as_deref()) {
+    if !crate::api::arr_routes::verify_webhook_secret_headers(&headers, config.jellyfin.webhook_secret.as_deref(), &["x-jellyfin-secret", "x-webhook-secret"]) {
         return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Jellyfin webhook secret"}))));
     }
 

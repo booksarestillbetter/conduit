@@ -124,20 +124,18 @@ async fn run(client: SynapseClient, torrents: SynapseLiveCache, entries: Weak<Ma
 
         // Torrents whose summary already carries tracker hosts (current Synapse) need no fetch.
         let all = torrents.list_torrents();
-        let present: Vec<String> = all.iter().map(|t| t.hash.clone()).collect();
-        let needs_fetch: std::collections::HashSet<&str> =
-            all.iter().filter(|t| t.tracker_hosts.is_empty()).map(|t| t.hash.as_str()).collect();
+        let present: std::collections::HashSet<&str> = all.iter().map(|t| t.hash.as_str()).collect();
         let now = Instant::now();
         let due: Vec<String> = {
             let mut map = entries.write();
-            map.retain(|h, _| present.contains(h));
-            present
-                .into_iter()
-                .filter(|h| needs_fetch.contains(h.as_str()))
-                .filter(|h| match map.get(h) {
+            map.retain(|h, _| present.contains(h.as_str()));
+            all.iter()
+                .filter(|t| t.tracker_hosts.is_empty())
+                .filter(|t| match map.get(&t.hash) {
                     None => true,
                     Some(e) => now.duration_since(e.fetched_at) >= if e.ok { REFRESH_AFTER } else { RETRY_AFTER_FAILURE },
                 })
+                .map(|t| t.hash.clone())
                 .take(MAX_FETCHES_PER_CYCLE)
                 .collect()
         };

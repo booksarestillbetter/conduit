@@ -1,6 +1,6 @@
 // src/api/torrent_routes.rs
 use crate::api::op_error::{is_unsupported, op_failure, status_only, ApiError};
-use crate::auth::RequireAuth;
+use crate::auth::{RequireRead, RequireTorrentsWrite};
 use crate::db::Database;
 use crate::fetcher::{
     AddTorrentPayload, AggregateStats, BulkTorrentActionPayload, DetailedTorrent,
@@ -69,7 +69,7 @@ fn default_true() -> bool { true }
     )
 )]
 pub async fn list_torrents(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(pool): State<Arc<FetcherPool>>,
     State(db): State<Database>,
     Query(params): Query<TorrentQueryParams>,
@@ -102,7 +102,7 @@ pub async fn list_torrents(
     )
 )]
 pub async fn get_stats(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(pool): State<Arc<FetcherPool>>,
 ) -> Json<AggregateStats> {
     Json(pool.get_aggregate_stats())
@@ -127,7 +127,7 @@ pub struct BandwidthHistoryQueryParams {
     )
 )]
 pub async fn get_bandwidth_history(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(db): State<Database>,
     Query(params): Query<BandwidthHistoryQueryParams>,
 ) -> Result<Json<Vec<crate::fetcher::BandwidthPoint>>, StatusCode> {
@@ -153,7 +153,7 @@ pub async fn get_bandwidth_history(
     )
 )]
 pub async fn get_torrent(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(pool): State<Arc<FetcherPool>>,
     State(db): State<Database>,
     State(ip_asn_cache): State<crate::ip_asn::IpAsnCache>,
@@ -161,8 +161,8 @@ pub async fn get_torrent(
 ) -> Result<Json<DetailedTorrent>, StatusCode> {
     // If not formatted as node:id, resolve from hash or grab id
     if !compound_id.contains(':') {
-        if let Some(t) = pool.get_torrents(None, None, None).into_iter().find(|t| t.hash_string.eq_ignore_ascii_case(&compound_id)) {
-            compound_id = t.compound_id;
+        if let Some(cid) = pool.resolve_compound_id_by_hash(&compound_id) {
+            compound_id = cid;
         } else if let Ok(Some(grab)) = db.get_arr_grab_by_id(&compound_id) {
             compound_id = format!("pipeline:{}", grab.id);
         } else {
@@ -174,8 +174,8 @@ pub async fn get_torrent(
         // that may not even be a real pool node) rather than a true "node:id" pair. Resolve it
         // the same way the no-colon case above does before treating it as node:id below.
         if n != "pipeline" && id_str.parse::<i64>().is_err() {
-            if let Some(t) = pool.get_torrents(None, None, None).into_iter().find(|t| t.hash_string.eq_ignore_ascii_case(id_str)) {
-                compound_id = t.compound_id;
+            if let Some(cid) = pool.resolve_compound_id_by_hash(id_str) {
+                compound_id = cid;
             }
         }
     }
@@ -660,7 +660,7 @@ pub async fn get_torrent(
     )
 )]
 pub async fn add_torrent(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Json(payload): Json<AddTorrentPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -703,7 +703,7 @@ pub async fn add_torrent(
     )
 )]
 pub async fn bulk_action(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Json(payload): Json<BulkTorrentActionPayload>,
 ) -> Result<Json<HashMap<String, crate::fetcher::BulkItemResult>>, (StatusCode, Json<serde_json::Value>)> {
@@ -729,7 +729,7 @@ pub async fn bulk_action(
     )
 )]
 pub async fn start_torrent(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Path(compound_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -763,7 +763,7 @@ pub async fn start_torrent(
     )
 )]
 pub async fn stop_torrent(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Path(compound_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -798,7 +798,7 @@ pub async fn stop_torrent(
     )
 )]
 pub async fn delete_torrent(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Path(compound_id): Path<String>,
     Query(params): Query<DeleteQueryParams>,
@@ -834,7 +834,7 @@ pub async fn delete_torrent(
     )
 )]
 pub async fn set_location(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Path(compound_id): Path<String>,
     Json(payload): Json<SetLocationPayload>,
@@ -879,7 +879,7 @@ pub struct MigrateTorrentPayload {
     )
 )]
 pub async fn migrate_torrent(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     State(db): State<Database>,
     Json(payload): Json<MigrateTorrentPayload>,
@@ -1282,7 +1282,7 @@ async fn find_radarr_queue_or_history(cfg: &crate::config::AppConfig, hash: &str
 async fn lookup_sonarr(cfg: &crate::config::AppConfig, query_str: &str) -> Option<serde_json::Value> {
     if cfg.sonarr.enabled {
         if let Some(primary) = cfg.sonarr.primary.as_ref() {
-            let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
+            let client = crate::api::shared_http_client();
             let url = format!("{}/api/v3/series/lookup", primary.base_url.trim_end_matches('/'));
             if let Ok(resp) = client.get(&url).header("X-Api-Key", &primary.api_key).query(&[("term", query_str)]).send().await {
                 if let Ok(results) = resp.json::<Vec<serde_json::Value>>().await {
@@ -1299,7 +1299,7 @@ async fn lookup_sonarr(cfg: &crate::config::AppConfig, query_str: &str) -> Optio
 async fn lookup_radarr(cfg: &crate::config::AppConfig, query_str: &str) -> Option<serde_json::Value> {
     if cfg.radarr.enabled {
         if let Some(primary) = cfg.radarr.primary.as_ref() {
-            let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
+            let client = crate::api::shared_http_client();
             let url = format!("{}/api/v3/movie/lookup", primary.base_url.trim_end_matches('/'));
             if let Ok(resp) = client.get(&url).header("X-Api-Key", &primary.api_key).query(&[("term", query_str)]).send().await {
                 if let Ok(results) = resp.json::<Vec<serde_json::Value>>().await {
@@ -1316,7 +1316,7 @@ async fn lookup_radarr(cfg: &crate::config::AppConfig, query_str: &str) -> Optio
 async fn lookup_lidarr(cfg: &crate::config::AppConfig, query_str: &str) -> Option<serde_json::Value> {
     if cfg.lidarr.enabled {
         if let Some(primary) = cfg.lidarr.primary.as_ref() {
-            let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
+            let client = crate::api::shared_http_client();
             let url = format!("{}/api/v1/search", primary.base_url.trim_end_matches('/'));
             if let Ok(resp) = client.get(&url).header("X-Api-Key", &primary.api_key).query(&[("term", query_str)]).send().await {
                 if let Ok(results) = resp.json::<Vec<serde_json::Value>>().await {
@@ -1917,14 +1917,14 @@ pub async fn perform_enrichment_for_torrent(
     )
 )]
 pub async fn enrich_torrent(
-    auth: RequireAuth,
+    auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     State(db): State<Database>,
     State(config_mgr): State<crate::config::ConfigManager>,
     State(ip_asn_cache): State<crate::ip_asn::IpAsnCache>,
     Path(compound_id): Path<String>,
 ) -> Result<Json<DetailedTorrent>, StatusCode> {
-    let detailed = get_torrent(auth.clone(), State(pool.clone()), State(db.clone()), State(ip_asn_cache), Path(compound_id.clone())).await?;
+    let detailed = get_torrent(crate::auth::RequireRead(auth.0.clone()), State(pool.clone()), State(db.clone()), State(ip_asn_cache), Path(compound_id.clone())).await?;
     let mut torrent = detailed.0;
 
     if torrent.arr_grab.is_some() {
@@ -1965,7 +1965,7 @@ const ENRICH_ALL_MAX_ITEMS_PER_CALL: usize = 100;
     )
 )]
 pub async fn enrich_all_torrents(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     State(db): State<Database>,
     State(config_mgr): State<crate::config::ConfigManager>,
@@ -2030,7 +2030,7 @@ pub struct QueueMovePayload {
     )
 )]
 pub async fn queue_move_torrent(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Path(compound_id): Path<String>,
     Json(payload): Json<QueueMovePayload>,
@@ -2067,7 +2067,7 @@ pub struct BulkQueueMovePayload {
     )
 )]
 pub async fn queue_move_bulk(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Json(payload): Json<BulkQueueMovePayload>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -2135,7 +2135,7 @@ pub struct SequentialDownloadPayload {
     )
 )]
 pub async fn set_sequential_download(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Path(compound_id): Path<String>,
     Json(payload): Json<SequentialDownloadPayload>,
@@ -2175,7 +2175,7 @@ pub struct RenamePathPayload {
     )
 )]
 pub async fn rename_torrent_path(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Path(compound_id): Path<String>,
     Json(payload): Json<RenamePathPayload>,
@@ -2215,7 +2215,7 @@ pub struct BatchReplaceTrackersPayload {
     )
 )]
 pub async fn batch_replace_trackers(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(pool): State<Arc<FetcherPool>>,
     Json(payload): Json<BatchReplaceTrackersPayload>,
 ) -> Result<Json<serde_json::Value>, ApiError> {

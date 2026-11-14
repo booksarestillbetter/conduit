@@ -1,5 +1,5 @@
 // src/api/arr_routes.rs
-use crate::auth::{AppState, RequireAdmin, RequireAuth};
+use crate::auth::{AppState, RequireAdmin, RequireArrWrite, RequireRead};
 use crate::db::ArrGrabRecord;
 use crate::notify::NotificationManager;
 use axum::{
@@ -1115,20 +1115,18 @@ async fn handle_lidarr_download_failure(
     Ok(Json(json!({"status": "ok", "event": event_type})))
 }
 
-pub fn verify_webhook_secret(headers: &HeaderMap, expected: Option<&str>) -> bool {
+pub fn verify_webhook_secret_headers(
+    headers: &HeaderMap,
+    expected: Option<&str>,
+    accepted_headers: &[&str],
+) -> bool {
     let expected = match expected {
         Some(s) if !s.trim().is_empty() => s.trim(),
         _ => return true,
     };
-    let provided = headers
-        .get("X-Webhook-Secret")
-        .or_else(|| headers.get("x-webhook-secret"))
-        .or_else(|| headers.get("X-Sonarr-Secret"))
-        .or_else(|| headers.get("X-Radarr-Secret"))
-        .or_else(|| headers.get("X-Lidarr-Secret"))
-        .or_else(|| headers.get("X-Plex-Token"))
-        .or_else(|| headers.get("Access-Token"))
-        .and_then(|h| h.to_str().ok())
+    let provided = accepted_headers
+        .iter()
+        .find_map(|name| headers.get(*name).and_then(|h| h.to_str().ok()))
         .unwrap_or("");
 
     use subtle::ConstantTimeEq;
@@ -1209,7 +1207,7 @@ pub async fn sonarr_inbound(
         Some(z) => (z.webhook_secret.clone(), Some(z.id.clone())),
         None => (config.sonarr.webhook_secret.clone(), None),
     };
-    if !verify_webhook_secret(&headers, expected_secret.as_deref()) {
+    if !verify_webhook_secret_headers(&headers, expected_secret.as_deref(), &["x-sonarr-secret", "x-webhook-secret"]) {
         return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Sonarr webhook secret"}))));
     }
 
@@ -1631,7 +1629,7 @@ pub async fn radarr_inbound(
         Some(z) => (z.webhook_secret.clone(), Some(z.id.clone())),
         None => (config.radarr.webhook_secret.clone(), None),
     };
-    if !verify_webhook_secret(&headers, expected_secret.as_deref()) {
+    if !verify_webhook_secret_headers(&headers, expected_secret.as_deref(), &["x-radarr-secret", "x-webhook-secret"]) {
         return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Radarr webhook secret"}))));
     }
 
@@ -2012,7 +2010,7 @@ pub async fn lidarr_inbound(
         Some(z) => (z.webhook_secret.clone(), Some(z.id.clone())),
         None => (config.lidarr.webhook_secret.clone(), None),
     };
-    if !verify_webhook_secret(&headers, expected_secret.as_deref()) {
+    if !verify_webhook_secret_headers(&headers, expected_secret.as_deref(), &["x-lidarr-secret", "x-webhook-secret"]) {
         return Err((StatusCode::UNAUTHORIZED, Json(json!({"status": "error", "message": "Invalid Lidarr webhook secret"}))));
     }
 
@@ -2393,10 +2391,10 @@ pub async fn test_arr_connection(
     _admin: RequireAdmin,
     Json(req): Json<ArrTestConnectionRequest>,
 ) -> Result<Json<ArrTestConnectionResponse>, StatusCode> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if crate::api::validate_integration_url(&req.base_url).is_err() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let client = crate::api::shared_http_client();
 
     let is_lidarr = req.app_type.eq_ignore_ascii_case("lidarr");
     let primary_url = if is_lidarr {
@@ -2887,7 +2885,7 @@ pub struct ArrStatsQueryParams {
     )
 )]
 pub async fn get_arr_stats(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(state): State<AppState>,
     Query(params): Query<ArrStatsQueryParams>,
 ) -> Result<Json<ArrStatsResponse>, StatusCode> {
@@ -3052,7 +3050,7 @@ pub struct ArrGrabsQueryParams {
     )
 )]
 pub async fn list_grabs(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(state): State<AppState>,
     Query(params): Query<ArrGrabsQueryParams>,
 ) -> Result<Json<Vec<crate::db::ArrGrabRecord>>, StatusCode> {
@@ -3086,18 +3084,18 @@ pub struct PipelineQueryParams {
     )
 )]
 pub async fn list_pipeline(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(state): State<AppState>,
     Query(params): Query<PipelineQueryParams>,
 ) -> Result<Json<Vec<crate::db::ArrGrabRecord>>, StatusCode> {
     let limit = params.limit.unwrap_or(100).min(1000);
-    let items = state.db.list_pipeline_items(
+    let items = state.db.list_pipeline_items_async(
         limit,
-        params.app.as_deref(),
-        params.status.as_deref(),
-        params.q.as_deref(),
-        params.zone.as_deref(),
-    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        params.app,
+        params.status,
+        params.q,
+        params.zone,
+    ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(items))
 }
 
@@ -3117,7 +3115,7 @@ pub async fn list_pipeline(
     )
 )]
 pub async fn delete_pipeline_item(
-    _auth: RequireAuth,
+    _auth: RequireArrWrite,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -3144,7 +3142,7 @@ pub async fn delete_pipeline_item(
     )
 )]
 pub async fn get_grab_history(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<crate::db::ArrGrabHistoryEntry>>, StatusCode> {
@@ -3168,7 +3166,7 @@ pub async fn get_grab_history(
     )
 )]
 pub async fn re_search_pipeline_item(
-    _auth: RequireAuth,
+    _auth: RequireArrWrite,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -3307,7 +3305,7 @@ pub async fn re_search_pipeline_item(
     )
 )]
 pub async fn purge_pipeline(
-    _auth: RequireAuth,
+    _auth: RequireArrWrite,
     State(state): State<AppState>,
     Query(params): Query<PipelineQueryParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -3346,7 +3344,7 @@ pub struct SearchReleasesQuery {
     )
 )]
 pub async fn search_releases(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(state): State<AppState>,
     Query(params): Query<SearchReleasesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -3443,7 +3441,7 @@ pub struct GrabReleasePayload {
     )
 )]
 pub async fn grab_release(
-    _auth: RequireAuth,
+    _auth: RequireArrWrite,
     State(state): State<AppState>,
     Json(payload): Json<GrabReleasePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -3607,6 +3605,8 @@ mod tests {
             ip_asn_db: crate::ip_asn::new_cache(),
             engine_registry: crate::engines::registry::new_registry(),
             event_bus: crate::events::new_bus(),
+            hardlink_cache: Default::default(),
+            oidc_states: Default::default(),
         };
 
         let health_payload = json!({
@@ -3650,6 +3650,8 @@ mod tests {
             ip_asn_db: crate::ip_asn::new_cache(),
             engine_registry: crate::engines::registry::new_registry(),
             event_bus: crate::events::new_bus(),
+            hardlink_cache: Default::default(),
+            oidc_states: Default::default(),
         };
 
         let manual_payload = json!({

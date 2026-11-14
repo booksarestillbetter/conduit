@@ -41,6 +41,22 @@ async fn check_canary_recovered(pool: &FetcherPool, tracker_host: &str, canary_o
     false
 }
 
+async fn resume_compound_ids(pool: &FetcherPool, compound_ids: &[String]) {
+    let mut by_node: HashMap<&str, Vec<i64>> = HashMap::new();
+    for cid in compound_ids {
+        if let Some((node, id_str)) = cid.split_once(':') {
+            if let Ok(id) = id_str.parse::<i64>() {
+                by_node.entry(node).or_default().push(id);
+            }
+        }
+    }
+    for (node, ids) in by_node {
+        if let Some(client) = pool.get_client(node) {
+            let _ = client.start_torrents(&ids, false).await;
+        }
+    }
+}
+
 pub async fn run_circuit_breaker_loop(
     config_mgr: ConfigManager,
     pool: Arc<FetcherPool>,
@@ -83,15 +99,7 @@ pub async fn run_circuit_breaker_loop(
                 // and drop Conduit's own record rather than keep fighting the daemon.
                 if let Some(list) = candidate_torrents {
                     if is_host_all_passive(&pool, list) {
-                        for cid in &breaker.paused_torrents {
-                            if let Some((node, id_str)) = cid.split_once(':') {
-                                if let Ok(id) = id_str.parse::<i64>() {
-                                    if let Some(client) = pool.get_client(node) {
-                                        let _ = client.start_torrents(&[id], false).await;
-                                    }
-                                }
-                            }
-                        }
+                        resume_compound_ids(&pool, &breaker.paused_torrents).await;
                         let msg = format!(
                             "⚡ Tracker '{}' is now managed natively by its node — handing off from Conduit's external breaker and resuming {} torrents.",
                             tracker_host,
@@ -117,15 +125,7 @@ pub async fn run_circuit_breaker_loop(
                         tracker_host, tripped_secs, cb_cfg.max_tripped_secs
                     );
                     if cb_cfg.auto_resume_on_recovery {
-                        for cid in &breaker.paused_torrents {
-                            if let Some((node, id_str)) = cid.split_once(':') {
-                                if let Ok(id) = id_str.parse::<i64>() {
-                                    if let Some(client) = pool.get_client(node) {
-                                        let _ = client.start_torrents(&[id], false).await;
-                                    }
-                                }
-                            }
-                        }
+                        resume_compound_ids(&pool, &breaker.paused_torrents).await;
                     }
                     let msg = format!(
                         "⚡ Tracker Circuit Breaker Force-Cleared: '{}' exceeded the max tripped duration ({}s) without a confirmed canary recovery — resuming {} torrents anyway so they aren't paused forever. Verify the tracker manually if it's still down.",
@@ -243,15 +243,11 @@ pub async fn run_circuit_breaker_loop(
                         };
 
                         let mut still_paused = breaker.paused_torrents.clone();
-                        while still_paused.len() > target_still_paused {
-                            let Some(cid) = still_paused.pop() else { break };
-                            if let Some((node, id_str)) = cid.split_once(':') {
-                                if let Ok(id) = id_str.parse::<i64>() {
-                                    if let Some(client) = pool.get_client(node) {
-                                        let _ = client.start_torrents(&[id], false).await;
-                                    }
-                                }
-                            }
+                        let drain_count = still_paused.len().saturating_sub(target_still_paused);
+                        if drain_count > 0 {
+                            let start_idx = still_paused.len() - drain_count;
+                            let to_resume: Vec<String> = still_paused.drain(start_idx..).collect();
+                            resume_compound_ids(&pool, &to_resume).await;
                         }
 
                         let mut updated = breaker.clone();

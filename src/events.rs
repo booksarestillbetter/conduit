@@ -13,6 +13,7 @@
 //! of sync with each other.
 
 use serde::Serialize;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// Generous enough that a burst of writes (e.g. a season-pack import logging several events at
@@ -40,6 +41,8 @@ pub const TOPIC_TELEMETRY: &str = "telemetry";
 pub struct ChannelEvent {
     pub topic: String,
     pub payload: serde_json::Value,
+    #[serde(skip)]
+    pub pre_serialized: Option<Arc<String>>,
 }
 
 pub type EventBus = broadcast::Sender<ChannelEvent>;
@@ -53,7 +56,28 @@ pub fn new_bus() -> EventBus {
 /// subscribers (a fresh `broadcast::Sender::send` returning `Err` just means "nobody's
 /// listening right now," not a failure) or if serialization somehow fails.
 pub fn publish(bus: &EventBus, topic: &str, payload: &impl Serialize) {
+    if bus.receiver_count() == 0 {
+        return;
+    }
     if let Ok(value) = serde_json::to_value(payload) {
-        let _ = bus.send(ChannelEvent { topic: topic.to_string(), payload: value });
+        let _ = bus.send(ChannelEvent {
+            topic: topic.to_string(),
+            payload: value,
+            pre_serialized: None,
+        });
+    }
+}
+
+/// Serializes `payload` into a shared JSON string once for all subscribers on `topic`.
+pub fn publish_pre_serialized(bus: &EventBus, topic: &str, payload: &impl Serialize) {
+    if bus.receiver_count() == 0 {
+        return;
+    }
+    if let Ok(json_str) = serde_json::to_string(payload) {
+        let _ = bus.send(ChannelEvent {
+            topic: topic.to_string(),
+            payload: serde_json::Value::Null,
+            pre_serialized: Some(Arc::new(json_str)),
+        });
     }
 }

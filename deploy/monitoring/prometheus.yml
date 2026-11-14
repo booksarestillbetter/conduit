@@ -1,0 +1,18 @@
+# Prometheus scrape configuration for Conduit
+# Mount or include this job in your prometheus.yml.
+# If `system.metrics_public` is false (default), create an API token with
+# `system:read` scope in Conduit Settings and configure `authorization`.
+
+scrape_configs:
+  - job_name: "conduit"
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+    scheme: http
+    # authorization:
+    #   type: Bearer
+    #   credentials: "<CONDUIT_API_TOKEN>"
+    static_configs:
+      - targets:
+          - "conduit:8787"
+        labels:
+          instance: "conduit-primary"

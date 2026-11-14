@@ -6,7 +6,6 @@
 
 use crate::config::ConfigManager;
 use serde::Deserialize;
-use std::time::Duration;
 use tracing::{info, warn};
 
 pub const API_BASE: &str = "https://api.trakt.tv";
@@ -16,11 +15,7 @@ pub const API_BASE: &str = "https://api.trakt.tv";
 const REFRESH_MARGIN_SECS: i64 = 3600;
 
 fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_default()
+    crate::api::shared_http_client().clone()
 }
 
 #[derive(Debug, Deserialize)]

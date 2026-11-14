@@ -13,6 +13,139 @@ use walkdir::WalkDir;
 /// only renamed into `target` once complete — `rename` within the same directory is atomic, so
 /// a killed process or interrupted copy can never leave a partial file at `target` for the
 /// `target.exists()` "already synced" check to be fooled by.
+pub const ALLOWED_SYNC_EXECUTABLES: &[&str] = &["cp", "rsync", "ln", "mv", "rclone"];
+
+/// Validates that `cmd` invokes an allowlisted file-transfer binary (no arbitrary shell/commands).
+pub fn validate_sync_cmd(cmd: &str) -> Result<(), String> {
+    let Some(exe) = cmd.split_whitespace().next() else {
+        return Ok(());
+    };
+    let bin = Path::new(exe)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(exe);
+    if ALLOWED_SYNC_EXECUTABLES.contains(&bin) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Disallowed file_sync.sync_cmd executable '{}'; allowed: {}",
+            bin,
+            ALLOWED_SYNC_EXECUTABLES.join(", ")
+        ))
+    }
+}
+
+fn is_native_hardlink_cmd(cmd: &str) -> bool {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        return true;
+    }
+    let exe = Path::new(parts[0])
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if exe != "cp" {
+        return false;
+    }
+    let mut has_link_flag = false;
+    for arg in &parts[1..] {
+        if *arg == "--link" {
+            has_link_flag = true;
+            continue;
+        }
+        if !arg.starts_with('-') || arg.starts_with("--") {
+            return false;
+        }
+        for ch in arg[1..].chars() {
+            match ch {
+                'l' => has_link_flag = true,
+                'a' | 'v' | 'r' | 'R' | 'f' | 'n' | 'p' => {}
+                _ => return false,
+            }
+        }
+    }
+    has_link_flag
+}
+
+fn hard_link_or_copy_sync(src: &Path, dest: &Path) -> std::io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if dest.exists() {
+        let _ = std::fs::remove_file(dest);
+    }
+    match std::fs::hard_link(src, dest) {
+        Ok(()) => Ok(()),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::CrossesDevices
+                || e.raw_os_error() == Some(18)
+                || e.kind() == std::io::ErrorKind::Unsupported =>
+        {
+            std::fs::copy(src, dest).map(|_| ())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Native Rust fast-path for `cp -al` / default sync: hard-links files (and
+/// directory trees recursively) without spawning an external subprocess,
+/// falling back to `std::fs::copy` on cross-device (`EXDEV`) errors.
+pub async fn sync_path_native(src: &Path, staging_dest: &Path) -> std::io::Result<()> {
+    let src_owned = src.to_path_buf();
+    let dest_owned = staging_dest.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let meta = std::fs::symlink_metadata(&src_owned)?;
+        if meta.is_dir() {
+            if dest_owned.exists() {
+                let _ = std::fs::remove_dir_all(&dest_owned);
+            }
+            std::fs::create_dir_all(&dest_owned)?;
+            for entry in walkdir::WalkDir::new(&src_owned) {
+                let entry = entry.map_err(std::io::Error::other)?;
+                let rel = entry
+                    .path()
+                    .strip_prefix(&src_owned)
+                    .map_err(std::io::Error::other)?;
+                if rel.as_os_str().is_empty() {
+                    continue;
+                }
+                let target = dest_owned.join(rel);
+                if entry.file_type().is_dir() {
+                    std::fs::create_dir_all(&target)?;
+                } else {
+                    hard_link_or_copy_sync(entry.path(), &target)?;
+                }
+            }
+            Ok(())
+        } else {
+            hard_link_or_copy_sync(&src_owned, &dest_owned)
+        }
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+async fn run_sync_command(
+    cmd: &str,
+    src: &Path,
+    staging_dest: &Path,
+) -> std::io::Result<bool> {
+    validate_sync_cmd(cmd)
+        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg))?;
+    if is_native_hardlink_cmd(cmd) {
+        sync_path_native(src, staging_dest).await?;
+        return Ok(true);
+    }
+    let cmd_parts: Vec<&str> = cmd.split_whitespace().collect();
+    let status = Command::new(cmd_parts[0])
+        .args(&cmd_parts[1..])
+        .arg(src)
+        .arg(staging_dest)
+        .status()
+        .await?;
+    Ok(status.success())
+}
+
 fn staging_path_for(target: &Path) -> PathBuf {
     let file_name = target.file_name().and_then(|f| f.to_str()).unwrap_or("file");
     target.with_file_name(format!(".conduit-sync-{}", file_name))
@@ -186,27 +319,13 @@ async fn sync_mapping_directory(
                     .arg(&staging_dest)
                     .status()
                     .await
+                    .map(|s| s.success())
             } else {
-                let cmd_parts: Vec<&str> = default_cmd.split_whitespace().collect();
-                if cmd_parts.is_empty() {
-                    Command::new("cp")
-                        .args(["-al", "-v"])
-                        .arg(file_path)
-                        .arg(&staging_dest)
-                        .status()
-                        .await
-                } else {
-                    Command::new(cmd_parts[0])
-                        .args(&cmd_parts[1..])
-                        .arg(file_path)
-                        .arg(&staging_dest)
-                        .status()
-                        .await
-                }
+                run_sync_command(default_cmd, file_path, &staging_dest).await
             };
 
             match status {
-                Ok(s) if s.success() => {
+                Ok(true) => {
                     if let Err(e) = finalize_staged_copy(&staging_dest, &target_dest).await {
                         error!("Ingested '{}' but failed to finalize into place at {}: {}", file_name, target_dest.display(), e);
                         continue;
@@ -219,9 +338,9 @@ async fn sync_mapping_directory(
                         None,
                     );
                 }
-                Ok(s) => {
+                Ok(false) => {
                     let _ = tokio::fs::remove_file(&staging_dest).await;
-                    warn!("Ingestion command exited with non-zero code {}: {}", s, file_path.display());
+                    warn!("Ingestion command exited with non-zero status: {}", file_path.display());
                 }
                 Err(e) => {
                     let _ = tokio::fs::remove_file(&staging_dest).await;
@@ -306,25 +425,10 @@ async fn sync_directory_files(
             // same-directory name so a killed transfer never leaves a partial file at
             // target_dest for the exists()-check above to mistake for "already synced".
             let staging_dest = staging_path_for(&target_dest);
-            let cmd_parts: Vec<&str> = sync_cmd.split_whitespace().collect();
-            let status = if cmd_parts.is_empty() {
-                Command::new("cp")
-                    .args(["-al", "-v"])
-                    .arg(file_path)
-                    .arg(&staging_dest)
-                    .status()
-                    .await
-            } else {
-                Command::new(cmd_parts[0])
-                    .args(&cmd_parts[1..])
-                    .arg(file_path)
-                    .arg(&staging_dest)
-                    .status()
-                    .await
-            };
+            let status = run_sync_command(sync_cmd, file_path, &staging_dest).await;
 
             match status {
-                Ok(s) if s.success() => {
+                Ok(true) => {
                     if let Err(e) = finalize_staged_copy(&staging_dest, &target_dest).await {
                         error!("Synced '{}' but failed to finalize into place at {}: {}", file_name, target_dest.display(), e);
                         continue;
@@ -337,9 +441,9 @@ async fn sync_directory_files(
                         None,
                     );
                 }
-                Ok(s) => {
+                Ok(false) => {
                     let _ = tokio::fs::remove_file(&staging_dest).await;
-                    warn!("Sync command exited with non-zero code {}: {}", s, file_path.display());
+                    warn!("Sync command exited with non-zero status: {}", file_path.display());
                 }
                 Err(e) => {
                     let _ = tokio::fs::remove_file(&staging_dest).await;
@@ -382,4 +486,47 @@ pub async fn refresh_plex_sections(plex_url: &str, token: &str) -> anyhow::Resul
     let _ = client.get(&url).send().await?;
     info!("Triggered Plex library sections refresh at {}", plex_url);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_native_hardlink_cmd() {
+        assert!(is_native_hardlink_cmd(""));
+        assert!(is_native_hardlink_cmd("cp -al"));
+        assert!(is_native_hardlink_cmd("cp -al -v"));
+        assert!(is_native_hardlink_cmd("cp -l"));
+        assert!(!is_native_hardlink_cmd("cp -a"));
+        assert!(!is_native_hardlink_cmd("rsync -av"));
+        assert!(!is_native_hardlink_cmd("rclone copy"));
+    }
+
+    #[tokio::test]
+    async fn test_sync_path_native_hardlink_file_and_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_file = dir.path().join("movie.mkv");
+        std::fs::write(&src_file, b"video-data").unwrap();
+        let dst_file = dir.path().join("staging").join("movie.mkv");
+        sync_path_native(&src_file, &dst_file).await.unwrap();
+        assert_eq!(std::fs::read(&dst_file).unwrap(), b"video-data");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(&src_file).unwrap().ino(),
+                std::fs::metadata(&dst_file).unwrap().ino()
+            );
+        }
+
+        let src_dir = dir.path().join("Show.S01");
+        std::fs::create_dir_all(src_dir.join("Extras")).unwrap();
+        std::fs::write(src_dir.join("ep1.mkv"), b"ep1").unwrap();
+        std::fs::write(src_dir.join("Extras").join("behind.mkv"), b"extra").unwrap();
+        let dst_dir = dir.path().join("staging_dir").join("Show.S01");
+        sync_path_native(&src_dir, &dst_dir).await.unwrap();
+        assert_eq!(std::fs::read(dst_dir.join("ep1.mkv")).unwrap(), b"ep1");
+        assert_eq!(std::fs::read(dst_dir.join("Extras").join("behind.mkv")).unwrap(), b"extra");
+    }
 }

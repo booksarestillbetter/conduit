@@ -1022,3 +1022,86 @@ export async function purgeHistoryNow(): Promise<RetentionPurgeSummary> {
   if (!res.ok) return failWith(res, 'Failed to purge history');
   return res.json();
 }
+
+// --- Hardlink Health Checker ---
+
+export async function getHardlinkHealth(): Promise<import('../types').HardlinkHealthReport> {
+  const res = await apiFetch(`${API_BASE}/api/system/hardlinks`, {
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) return failWith(res, 'Failed to fetch hardlink health');
+  return res.json();
+}
+
+export async function scanHardlinksNow(): Promise<import('../types').HardlinkHealthReport> {
+  const res = await apiFetch(`${API_BASE}/api/system/hardlinks/scan`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) return failWith(res, 'Failed to scan hardlinks');
+  return res.json();
+}
+
+// --- RBAC Users & OIDC ---
+
+export async function getOidcPublicConfig(): Promise<{ enabled: boolean; provider_name: string }> {
+  const res = await apiFetch(`${API_BASE}/api/auth/oidc/config`);
+  if (!res.ok) return { enabled: false, provider_name: 'SSO' };
+  return res.json();
+}
+
+export async function listUsers(): Promise<import('../types').UserRecord[]> {
+  const res = await apiFetch(`${API_BASE}/api/auth/users`, {
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) return failWith(res, 'Failed to load users');
+  return res.json();
+}
+
+export async function createUserAccount(payload: {
+  username: string;
+  password: string;
+  role: string;
+}): Promise<import('../types').UserRecord> {
+  const res = await apiFetch(`${API_BASE}/api/auth/users`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) return failWith(res, 'Failed to create user');
+  return res.json();
+}
+
+export async function updateUserRole(id: string, role: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/auth/users/${encodeURIComponent(id)}/role`, {
+    method: 'PUT',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) return failWith(res, 'Failed to update user role');
+}
+
+export async function deleteUserAccount(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/auth/users/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) return failWith(res, 'Failed to delete user');
+}
+
+// --- Off-Site Backup ---
+
+export async function runOffsiteBackupNow(): Promise<{
+  target_type: string;
+  location: string;
+  bytes: number;
+  pruned_files: number;
+  timestamp: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/api/settings/backup/offsite`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) return failWith(res, 'Off-site backup failed');
+  return res.json();
+}

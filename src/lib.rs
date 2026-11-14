@@ -13,3 +13,5 @@ pub mod trakt_client;
 pub mod plex_client;
 pub mod fetcher;
 pub mod web;
+
+pub use api::shared_http_client;

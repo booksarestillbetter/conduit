@@ -11,7 +11,6 @@
 
 use crate::config::PlexNodeConfig;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use tracing::{debug, warn};
 
 const PLEX_PRODUCT: &str = "Conduit";
@@ -19,11 +18,7 @@ const PLEX_DEVICE_NAME: &str = "Conduit Media Server";
 const PLEX_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_default()
+    crate::api::shared_http_client().clone()
 }
 
 /// Every `X-Plex-*` identity header Plex expects on both plex.tv and direct-server calls.

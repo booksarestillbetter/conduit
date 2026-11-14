@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -19,8 +19,8 @@ import {
   X,
   Cog,
 } from 'lucide-react';
-import { SystemHealthOverview, EngineStatus } from '../types';
-import { batchReplaceTrackers, forceTripCircuitBreaker, forceResetCircuitBreaker } from '../services/api';
+import { SystemHealthOverview, EngineStatus, HardlinkHealthReport } from '../types';
+import { batchReplaceTrackers, forceTripCircuitBreaker, forceResetCircuitBreaker, getHardlinkHealth, scanHardlinksNow } from '../services/api';
 
 interface HealthPanelProps {
   health: SystemHealthOverview | null;
@@ -45,7 +45,27 @@ export const HealthPanel: React.FC<HealthPanelProps> = ({
   onViewTorrent,
   onFilterTracker,
 }) => {
-  const [activeTab, setActiveTab] = useState<'trackers' | 'nodes' | 'metrics' | 'engines'>('trackers');
+  const [activeTab, setActiveTab] = useState<'trackers' | 'nodes' | 'metrics' | 'engines' | 'hardlinks'>('trackers');
+  const [hardlinkReport, setHardlinkReport] = useState<HardlinkHealthReport | null>(null);
+  const [hardlinkScanning, setHardlinkScanning] = useState(false);
+
+  useEffect(() => {
+    if (activeTab === 'hardlinks' && !hardlinkReport) {
+      getHardlinkHealth().then(setHardlinkReport).catch(() => {});
+    }
+  }, [activeTab, hardlinkReport]);
+
+  const handleScanHardlinks = async () => {
+    setHardlinkScanning(true);
+    try {
+      const report = await scanHardlinksNow();
+      setHardlinkReport(report);
+    } catch {
+      // ignore
+    } finally {
+      setHardlinkScanning(false);
+    }
+  };
   const [trackerFilter, setTrackerFilter] = useState<'all' | 'broken' | 'warnings'>('all');
   const [copiedMetricsUrl, setCopiedMetricsUrl] = useState(false);
   const [isReplaceModalOpen, setIsReplaceModalOpen] = useState(false);
@@ -216,6 +236,18 @@ export const HealthPanel: React.FC<HealthPanelProps> = ({
                 {engines.filter((e) => e.state === 'crashed' || e.state === 'degraded').length}
               </span>
             )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('hardlinks')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center space-x-1.5 ${
+              activeTab === 'hardlinks'
+                ? 'bg-slate-800 text-slate-100 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <HardDrive className="h-3.5 w-3.5 text-emerald-400" />
+            <span>Hardlinks</span>
           </button>
         </div>
       </div>
@@ -745,6 +777,78 @@ export const HealthPanel: React.FC<HealthPanelProps> = ({
                 );
               })}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* HARDLINKS TAB */}
+      {activeTab === 'hardlinks' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div>
+              <h4 className="text-sm font-bold text-slate-100">Hardlink &amp; Staging Integrity</h4>
+              <p className="text-xs text-slate-400">
+                Verifies inode sharing between download stores and staging/library destinations.
+                {hardlinkReport?.scanned_at && ` Last scanned ${timeAgo(hardlinkReport.scanned_at)}.`}
+              </p>
+            </div>
+            <button
+              onClick={handleScanHardlinks}
+              disabled={hardlinkScanning}
+              className="flex items-center space-x-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${hardlinkScanning ? 'animate-spin' : ''}`} />
+              <span>{hardlinkScanning ? 'Scanning...' : 'Scan Now'}</span>
+            </button>
+          </div>
+
+          {hardlinkReport && (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+                  <div className="text-[11px] text-slate-400">Directory Pairs</div>
+                  <div className="text-lg font-bold text-slate-100">{hardlinkReport.total_pairs}</div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+                  <div className="text-[11px] text-slate-400">Healthy Hardlinks</div>
+                  <div className="text-lg font-bold text-emerald-400">{hardlinkReport.hardlinked_files}</div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+                  <div className="text-[11px] text-slate-400">Duplicate Copies</div>
+                  <div className={`text-lg font-bold ${hardlinkReport.duplicate_copy_files > 0 ? 'text-amber-400' : 'text-slate-100'}`}>
+                    {hardlinkReport.duplicate_copy_files}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+                  <div className="text-[11px] text-slate-400">Wasted Space</div>
+                  <div className={`text-lg font-bold ${hardlinkReport.wasted_bytes > 0 ? 'text-rose-400' : 'text-slate-100'}`}>
+                    {(hardlinkReport.wasted_bytes / (1024 * 1024 * 1024)).toFixed(2)} GB
+                  </div>
+                </div>
+              </div>
+
+              {hardlinkReport.issues.length > 0 && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-4 space-y-2">
+                  <div className="text-xs font-bold text-amber-300">
+                    Detected Issues ({hardlinkReport.issues.length})
+                  </div>
+                  <div className="max-h-56 overflow-y-auto space-y-1.5 text-xs">
+                    {hardlinkReport.issues.map((issue, idx) => (
+                      <div key={idx} className="flex items-center justify-between rounded-lg bg-slate-900/80 px-3 py-2 border border-slate-800">
+                        <div className="truncate pr-3">
+                          <span className="font-mono text-amber-300 mr-2">[{issue.kind}]</span>
+                          <span className="text-slate-200">{issue.path}</span>
+                          <div className="text-[11px] text-slate-400">{issue.detail}</div>
+                        </div>
+                        <span className="shrink-0 font-mono text-slate-400">
+                          {(issue.size_bytes / (1024 * 1024)).toFixed(1)} MB
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

@@ -28,14 +28,14 @@ pub trait TorrentClientTrait: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Forces a tracker host's native breaker into a tripped state. No-op default.
+    /// Forces a tracker host's native breaker into a tripped state.
     async fn force_trip_circuit_breaker(&self, _host: &str) -> anyhow::Result<()> {
-        Ok(())
+        anyhow::bail!("Native tracker circuit breaker force-trip is not supported by {}", self.client_type())
     }
 
-    /// Clears a tracker host's native breaker state entirely. No-op default.
+    /// Clears a tracker host's native breaker state entirely.
     async fn force_reset_circuit_breaker(&self, _host: &str) -> anyhow::Result<()> {
-        Ok(())
+        anyhow::bail!("Native tracker circuit breaker force-reset is not supported by {}", self.client_type())
     }
 
     async fn get_torrents(&self, ids: Option<Vec<i64>>) -> anyhow::Result<Vec<Torrent>>;

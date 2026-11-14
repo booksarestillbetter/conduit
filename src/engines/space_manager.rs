@@ -31,19 +31,17 @@ pub async fn run_space_manager_loop(
                         .auto_purge_min_space_gb
                         .unwrap_or(config.space_manager.global_min_space_gb);
 
-                    let torrents = pool.get_torrents(Some(node_name), None, None);
                     // Measure free space on the actual download mount, not the root filesystem —
                     // fall back to "/" only if no torrents exist yet to source a real path from.
-                    let free_space_path = torrents
-                        .first()
-                        .map(|t| t.download_dir.clone())
-                        .filter(|d| !d.is_empty())
+                    let free_space_path = pool
+                        .get_first_download_dir(node_name)
                         .unwrap_or_else(|| "/".to_string());
 
-                    // Check free space on node
+                    // Check free space on node before cloning the full torrent list
                     if let Ok(free_bytes) = client.get_free_space(&free_space_path).await {
                         let free_gb = (free_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
                         if free_gb < (min_space_gb as f64) {
+                            let torrents = pool.get_torrents(Some(node_name), None, None);
                             info!(
                                 "Node {} free space ({:.1} GB at {}) below threshold ({} GB). Evaluating auto-purge candidates.",
                                 node_name, free_gb, free_space_path, min_space_gb

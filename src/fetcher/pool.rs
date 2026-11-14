@@ -13,6 +13,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
+fn cmp_ignore_ascii_case(a: &str, b: &str) -> std::cmp::Ordering {
+    for (ba, bb) in a.bytes().zip(b.bytes()) {
+        let ord = ba.to_ascii_lowercase().cmp(&bb.to_ascii_lowercase());
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
 /// How long a detected `NodeCapabilities` snapshot stays valid before re-probing — long
 /// enough to avoid an extra RPC on every poll tick, short enough that an in-place daemon
 /// upgrade/downgrade is picked up without restarting Conduit.
@@ -87,6 +97,28 @@ impl FetcherPool {
     }
 
     pub fn sync_nodes_from_config(&self, config: &AppConfig) {
+        // Fast path: under read locks, check if enabled node set & configs are identical.
+        {
+            let clients_read = self.clients.read();
+            let cache_read = self.cache.read();
+            let enabled_count = config.nodes.values().filter(|n| n.enabled).count();
+            if clients_read.len() == enabled_count
+                && config.nodes.iter().all(|(name, cfg)| {
+                    if !cfg.enabled {
+                        !clients_read.contains_key(name) && !cache_read.contains_key(name)
+                    } else {
+                        clients_read
+                            .get(name)
+                            .map(|c| c.config() == cfg)
+                            .unwrap_or(false)
+                            && cache_read.contains_key(name)
+                    }
+                })
+            {
+                return;
+            }
+        }
+
         let mut clients_write = self.clients.write();
         let mut cache_write = self.cache.write();
         let mut kinds_write = self.node_kinds.write();
@@ -556,20 +588,21 @@ impl FetcherPool {
                 }
             }
 
+            let search_lower = search.map(str::to_lowercase);
+            let status_lower = status_filter.map(str::to_lowercase);
             if let Some(data) = cache.get(&node_name) {
                 for t in &data.torrents {
-                    if let Some(search_term) = search {
-                        let st = search_term.to_lowercase();
-                        let name_match = t.name.to_lowercase().contains(&st);
-                        let tracker_match = t.tracker_stats.iter().any(|ts| ts.host.to_lowercase().contains(&st));
-                        let hash_match = t.hash_string.to_lowercase().contains(&st);
+                    if let Some(ref st) = search_lower {
+                        let name_match = t.name.to_lowercase().contains(st);
+                        let tracker_match = t.tracker_stats.iter().any(|ts| ts.host.to_lowercase().contains(st));
+                        let hash_match = t.hash_string.to_lowercase().contains(st);
                         if !name_match && !tracker_match && !hash_match {
                             continue;
                         }
                     }
 
-                    if let Some(status_str) = status_filter {
-                        let matches_status = match status_str.to_lowercase().as_str() {
+                    if let Some(ref st) = status_lower {
+                        let matches_status = match st.as_str() {
                             "downloading" => t.status == TorrentStatus::Downloading,
                             "seeding" => t.status == TorrentStatus::Seeding,
                             "stopped" | "paused" => t.status == TorrentStatus::Stopped,
@@ -591,11 +624,11 @@ impl FetcherPool {
 
         // Deterministic default ordering:
         // 1. added_date descending (newest additions first)
-        // 2. Tie-breaker: name (case-insensitive)
+        // 2. Tie-breaker: name (case-insensitive, zero-allocation ASCII compare)
         // 3. Tie-breaker: compound_id
         results.sort_by(|a, b| {
             b.added_date.cmp(&a.added_date)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| cmp_ignore_ascii_case(&a.name, &b.name))
                 .then_with(|| a.compound_id.cmp(&b.compound_id))
         });
 
@@ -843,12 +876,69 @@ impl FetcherPool {
         self.active_breakers.write().remove(host);
     }
 
-    pub fn get_system_health(&self) -> SystemHealthOverview {
+    /// Fast hash lookup across cached nodes without cloning or sorting all torrents.
+    pub fn resolve_compound_id_by_hash(&self, hash: &str) -> Option<String> {
         let cache = self.cache.read();
+        for data in cache.values() {
+            if let Some(t) = data
+                .torrents
+                .iter()
+                .find(|t| t.hash_string.eq_ignore_ascii_case(hash))
+            {
+                return Some(t.compound_id.clone());
+            }
+        }
+        None
+    }
+
+    /// Returns the first non-empty `download_dir` cached for `node` without cloning all torrents.
+    pub fn get_first_download_dir(&self, node: &str) -> Option<String> {
+        let cache = self.cache.read();
+        cache.get(node).and_then(|data| {
+            data.torrents
+                .first()
+                .map(|t| t.download_dir.clone())
+                .filter(|d| !d.is_empty())
+        })
+    }
+
+    /// Lightweight scalar cluster totals without cloning per-node stats vectors.
+    pub fn get_scalar_totals(&self) -> (usize, usize, usize, i64, i64, i64) {
+        let cache = self.cache.read();
+        let total_nodes = cache.len();
+        let mut connected_nodes = 0usize;
+        let mut total_torrents = 0usize;
+        let mut total_download_speed = 0i64;
+        let mut total_upload_speed = 0i64;
+        let mut total_size_bytes = 0i64;
+        for data in cache.values() {
+            if data.connected {
+                connected_nodes += 1;
+            }
+            total_torrents += data.stats.total_torrents;
+            total_download_speed += data.stats.rate_download;
+            total_upload_speed += data.stats.rate_upload;
+            for t in &data.torrents {
+                total_size_bytes += t.total_size;
+            }
+        }
+        (
+            connected_nodes,
+            total_nodes,
+            total_torrents,
+            total_download_speed,
+            total_upload_speed,
+            total_size_bytes,
+        )
+    }
+
+    pub fn get_system_health(&self) -> SystemHealthOverview {
         let breakers = self.active_breakers.read().clone();
+        let native_breakers = self.native_breakers.read().clone();
+        let cache = self.cache.read();
 
         let mut node_health = Vec::new();
-        let mut all_torrents: Vec<UnifiedTorrent> = Vec::new();
+        let mut tracker_map: HashMap<&str, Vec<&UnifiedTorrent>> = HashMap::new();
 
         let mut total_torrents = 0;
         let mut connected_nodes = 0;
@@ -859,7 +949,14 @@ impl FetcherPool {
                 connected_nodes += 1;
             }
             total_torrents += data.torrents.len();
-            all_torrents.extend(data.torrents.clone());
+            for t in &data.torrents {
+                for ts in &t.tracker_stats {
+                    let host = ts.host.trim();
+                    if !host.is_empty() && host != "DHT" && host != "PEX" && host != "LPD" {
+                        tracker_map.entry(host).or_default().push(t);
+                    }
+                }
+            }
 
             let status = if !data.connected {
                 "unreachable".to_string()
@@ -894,22 +991,11 @@ impl FetcherPool {
         // Sort nodes alphabetically
         node_health.sort_by(|a, b| a.name.cmp(&b.name));
 
-        // Group torrents by tracker host
-        let mut tracker_map: HashMap<String, Vec<UnifiedTorrent>> = HashMap::new();
-        for t in &all_torrents {
-            for ts in &t.tracker_stats {
-                let host = ts.host.trim().to_string();
-                if !host.is_empty() && host != "DHT" && host != "PEX" && host != "LPD" {
-                    tracker_map.entry(host).or_default().push(t.clone());
-                }
-            }
-        }
-
         let mut tracker_health = Vec::new();
         let mut circuit_broken_count = 0;
 
         for (host, t_list) in &tracker_map {
-        let mut affected_nodes: HashSet<String> = HashSet::new();
+            let mut affected_nodes: HashSet<String> = HashSet::new();
             for t in t_list {
                 affected_nodes.insert(t.node.clone());
             }
@@ -923,8 +1009,7 @@ impl FetcherPool {
             let all_passive = !nodes_vec.is_empty() && nodes_vec.iter().all(|n| self.is_passive_mode(n));
             let native_status = if all_passive {
                 nodes_vec.iter().find_map(|n| {
-                    self.native_breakers
-                        .read()
+                    native_breakers
                         .get(n)
                         .and_then(|list| list.iter().find(|s| s.host == *host).cloned())
                 })
@@ -946,7 +1031,7 @@ impl FetcherPool {
                     _ => "circuit_broken", // tripped, half_open_canary
                 };
                 tracker_health.push(TrackerHealthStatus {
-                    host: host.clone(),
+                    host: (*host).to_string(),
                     status: mapped_status.to_string(),
                     total_torrents: t_list.len(),
                     online_torrents: t_list.len(),
@@ -969,7 +1054,7 @@ impl FetcherPool {
                 // Passive-mode node(s) that haven't reported a status for this host yet
                 // (not currently tracked by its breaker, i.e. implicitly healthy).
                 tracker_health.push(TrackerHealthStatus {
-                    host: host.clone(),
+                    host: (*host).to_string(),
                     status: "healthy".to_string(),
                     total_torrents: t_list.len(),
                     online_torrents: t_list.len(),
@@ -988,7 +1073,7 @@ impl FetcherPool {
                     recovery_progress_pct: None,
                     consecutive_successes: None,
                 });
-            } else if let Some(breaker) = breakers.get(host) {
+            } else if let Some(breaker) = breakers.get(*host) {
                 circuit_broken_count += 1;
 
                 // Find active canary probe announce result
@@ -1008,7 +1093,7 @@ impl FetcherPool {
                 }
 
                 tracker_health.push(TrackerHealthStatus {
-                    host: host.clone(),
+                    host: (*host).to_string(),
                     status: "circuit_broken".to_string(),
                     total_torrents: t_list.len(),
                     online_torrents: 1,
@@ -1078,7 +1163,7 @@ impl FetcherPool {
                 };
 
                 tracker_health.push(TrackerHealthStatus {
-                    host: host.clone(),
+                    host: (*host).to_string(),
                     status,
                     total_torrents: total,
                     online_torrents: online_count,

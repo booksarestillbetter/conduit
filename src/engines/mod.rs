@@ -1,8 +1,10 @@
 // src/engines/mod.rs
 pub mod arr_stats_poller;
 pub mod arr_sync;
+pub mod backup;
 pub mod circuit_breaker;
 pub mod file_sync;
+pub mod hardlink_checker;
 pub mod health_monitor;
 pub mod influx_pusher;
 pub mod ip_asn_updater;
@@ -34,13 +36,16 @@ pub fn start_all_engines(
     notifiers: Arc<NotificationManager>,
     arr_stats_cache: arr_stats_poller::ArrStatsCache,
     ip_asn_cache: crate::ip_asn::IpAsnCache,
+    hardlink_cache: hardlink_checker::HardlinkCache,
     registry: EngineRegistry,
     event_bus: EventBus,
-) {
-    // 1. Transmission Poller
+) -> tokio::sync::watch::Sender<bool> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // 1. Fetcher Poller
     {
         let (config_mgr, pool, db, registry) = (config_mgr.clone(), pool.clone(), db.clone(), registry.clone());
-        spawn_supervised("poller", registry.clone(), move || {
+        spawn_supervised("poller", registry.clone(), shutdown_rx.clone(), move || {
             poller::run_poller_loop(config_mgr.clone(), pool.clone(), db.clone(), TaskHandle::new(registry.clone(), "poller"))
         });
     }
@@ -48,7 +53,7 @@ pub fn start_all_engines(
     // 2. Space Manager & Auto-Purge
     {
         let (config_mgr, pool, db, registry) = (config_mgr.clone(), pool.clone(), db.clone(), registry.clone());
-        spawn_supervised("space_manager", registry.clone(), move || {
+        spawn_supervised("space_manager", registry.clone(), shutdown_rx.clone(), move || {
             space_manager::run_space_manager_loop(config_mgr.clone(), pool.clone(), db.clone(), TaskHandle::new(registry.clone(), "space_manager"))
         });
     }
@@ -56,7 +61,7 @@ pub fn start_all_engines(
     // 3. Error Pipeline & MediaReplacer
     {
         let (config_mgr, pool, db, registry) = (config_mgr.clone(), pool.clone(), db.clone(), registry.clone());
-        spawn_supervised("pipeline", registry.clone(), move || {
+        spawn_supervised("pipeline", registry.clone(), shutdown_rx.clone(), move || {
             pipeline::run_pipeline_loop(config_mgr.clone(), pool.clone(), db.clone(), TaskHandle::new(registry.clone(), "pipeline"))
         });
     }
@@ -64,7 +69,7 @@ pub fn start_all_engines(
     // 4. Tracker Circuit Breaker & Swarm Pressure Relief
     {
         let (config_mgr, pool, db, notifiers, registry) = (config_mgr.clone(), pool.clone(), db.clone(), notifiers.clone(), registry.clone());
-        spawn_supervised("circuit_breaker", registry.clone(), move || {
+        spawn_supervised("circuit_breaker", registry.clone(), shutdown_rx.clone(), move || {
             circuit_breaker::run_circuit_breaker_loop(config_mgr.clone(), pool.clone(), db.clone(), notifiers.clone(), TaskHandle::new(registry.clone(), "circuit_breaker"))
         });
     }
@@ -72,7 +77,7 @@ pub fn start_all_engines(
     // 5. File Sync & Queue Cleaner
     {
         let (config_mgr, db, registry) = (config_mgr.clone(), db.clone(), registry.clone());
-        spawn_supervised("file_sync", registry.clone(), move || {
+        spawn_supervised("file_sync", registry.clone(), shutdown_rx.clone(), move || {
             file_sync::run_file_sync_loop(config_mgr.clone(), db.clone(), TaskHandle::new(registry.clone(), "file_sync"))
         });
     }
@@ -80,7 +85,7 @@ pub fn start_all_engines(
     // 6. Sonarr / Radarr Multi-Node Sync
     {
         let (config_mgr, db, registry) = (config_mgr.clone(), db.clone(), registry.clone());
-        spawn_supervised("arr_sync", registry.clone(), move || {
+        spawn_supervised("arr_sync", registry.clone(), shutdown_rx.clone(), move || {
             arr_sync::run_arr_sync_loop(config_mgr.clone(), db.clone(), TaskHandle::new(registry.clone(), "arr_sync"))
         });
     }
@@ -88,7 +93,7 @@ pub fn start_all_engines(
     // 7. Trakt & Plex Watch History Sync
     {
         let (config_mgr, db, registry) = (config_mgr.clone(), db.clone(), registry.clone());
-        spawn_supervised("watch_sync", registry.clone(), move || {
+        spawn_supervised("watch_sync", registry.clone(), shutdown_rx.clone(), move || {
             watch_sync::run_watch_sync_loop(config_mgr.clone(), db.clone(), TaskHandle::new(registry.clone(), "watch_sync"))
         });
     }
@@ -96,7 +101,7 @@ pub fn start_all_engines(
     // 8. InfluxDB Metrics Pusher
     {
         let (config_mgr, pool, registry) = (config_mgr.clone(), pool.clone(), registry.clone());
-        spawn_supervised("influx_pusher", registry.clone(), move || {
+        spawn_supervised("influx_pusher", registry.clone(), shutdown_rx.clone(), move || {
             influx_pusher::run_influx_pusher_loop(config_mgr.clone(), pool.clone(), TaskHandle::new(registry.clone(), "influx_pusher"))
         });
     }
@@ -104,7 +109,7 @@ pub fn start_all_engines(
     // 9. Service Health Monitor & Failure Alerts
     {
         let (config_mgr, pool, db, notifiers, arr_stats_cache, registry) = (config_mgr.clone(), pool.clone(), db.clone(), notifiers.clone(), arr_stats_cache.clone(), registry.clone());
-        spawn_supervised("health_monitor", registry.clone(), move || {
+        spawn_supervised("health_monitor", registry.clone(), shutdown_rx.clone(), move || {
             health_monitor::run_health_monitor_loop(config_mgr.clone(), pool.clone(), db.clone(), notifiers.clone(), arr_stats_cache.clone(), TaskHandle::new(registry.clone(), "health_monitor"))
         });
     }
@@ -112,7 +117,7 @@ pub fn start_all_engines(
     // 10. Arr Ecosystem Stats Poller (backs the /api/arr/stats cache and the arr_stats topic)
     {
         let (config_mgr, db, arr_stats_cache, event_bus, registry) = (config_mgr.clone(), db.clone(), arr_stats_cache.clone(), event_bus.clone(), registry.clone());
-        spawn_supervised("arr_stats_poller", registry.clone(), move || {
+        spawn_supervised("arr_stats_poller", registry.clone(), shutdown_rx.clone(), move || {
             arr_stats_poller::run_arr_stats_poller_loop(config_mgr.clone(), db.clone(), arr_stats_cache.clone(), event_bus.clone(), TaskHandle::new(registry.clone(), "arr_stats_poller"))
         });
     }
@@ -120,7 +125,7 @@ pub fn start_all_engines(
     // 11. IP-to-ASN Enrichment Updater (opt-in; see config.ip_asn.enabled)
     {
         let (config_mgr, ip_asn_cache, registry) = (config_mgr.clone(), ip_asn_cache.clone(), registry.clone());
-        spawn_supervised("ip_asn_updater", registry.clone(), move || {
+        spawn_supervised("ip_asn_updater", registry.clone(), shutdown_rx.clone(), move || {
             ip_asn_updater::run_ip_asn_updater_loop(config_mgr.clone(), ip_asn_cache.clone(), TaskHandle::new(registry.clone(), "ip_asn_updater"))
         });
     }
@@ -130,7 +135,7 @@ pub fn start_all_engines(
     // small standalone poll rather than threading the bus through every other engine above)
     {
         let (event_bus, registry) = (event_bus.clone(), registry.clone());
-        spawn_supervised("platform_health_publisher", registry.clone(), move || {
+        spawn_supervised("platform_health_publisher", registry.clone(), shutdown_rx.clone(), move || {
             registry::run_platform_health_publisher(registry.clone(), event_bus.clone(), TaskHandle::new(registry.clone(), "platform_health_publisher"))
         });
     }
@@ -140,7 +145,7 @@ pub fn start_all_engines(
     // engines::telemetry for why this replaced N per-WebSocket-connection timers)
     {
         let (pool, db, event_bus, registry) = (pool.clone(), db.clone(), event_bus.clone(), registry.clone());
-        spawn_supervised("telemetry_publisher", registry.clone(), move || {
+        spawn_supervised("telemetry_publisher", registry.clone(), shutdown_rx.clone(), move || {
             telemetry::run_telemetry_publisher(pool.clone(), db.clone(), event_bus.clone(), TaskHandle::new(registry.clone(), "telemetry_publisher"))
         });
     }
@@ -149,7 +154,7 @@ pub fn start_all_engines(
     // node_alerts topic — see engines::node_alerts)
     {
         let (pool, event_bus, registry) = (pool.clone(), event_bus.clone(), registry.clone());
-        spawn_supervised("node_alerts", registry.clone(), move || {
+        spawn_supervised("node_alerts", registry.clone(), shutdown_rx.clone(), move || {
             node_alerts::run_node_alerts_loop(pool.clone(), event_bus.clone(), TaskHandle::new(registry.clone(), "node_alerts"))
         });
     }
@@ -157,7 +162,7 @@ pub fn start_all_engines(
     // 15. Data Retention (opt-in; see config.system.history_retention_days)
     {
         let (config_mgr, db, registry) = (config_mgr.clone(), db.clone(), registry.clone());
-        spawn_supervised("retention", registry.clone(), move || {
+        spawn_supervised("retention", registry.clone(), shutdown_rx.clone(), move || {
             retention::run_retention_loop(config_mgr.clone(), db.clone(), TaskHandle::new(registry.clone(), "retention"))
         });
     }
@@ -165,8 +170,39 @@ pub fn start_all_engines(
     // 16. Stats History (periodic snapshots + sampled peer-client breakdown for the Stats page)
     {
         let (pool, db, registry) = (pool.clone(), db.clone(), registry.clone());
-        spawn_supervised("stats_history", registry.clone(), move || {
+        spawn_supervised("stats_history", registry.clone(), shutdown_rx.clone(), move || {
             stats_history::run_stats_history_loop(pool.clone(), db.clone(), TaskHandle::new(registry.clone(), "stats_history"))
         });
     }
+
+    // 17. Hardlink & Staging Health Checker
+    {
+        let (config_mgr, db, notifiers, hardlink_cache, registry, rx) = (
+            config_mgr.clone(),
+            db.clone(),
+            notifiers.clone(),
+            hardlink_cache,
+            registry.clone(),
+            shutdown_rx.clone(),
+        );
+        tokio::spawn(async move {
+            hardlink_checker::run_hardlink_checker_loop(config_mgr, db, notifiers, hardlink_cache, registry, rx).await;
+        });
+    }
+
+    // 18. Automated Encrypted Off-Site Backups
+    {
+        let (config_mgr, db, notifiers, registry, rx) = (
+            config_mgr.clone(),
+            db.clone(),
+            notifiers.clone(),
+            registry.clone(),
+            shutdown_rx,
+        );
+        tokio::spawn(async move {
+            backup::run_backup_loop(config_mgr, db, notifiers, registry, rx).await;
+        });
+    }
+
+    shutdown_tx
 }

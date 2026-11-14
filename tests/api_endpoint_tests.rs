@@ -162,6 +162,8 @@ async fn setup_test_context() -> TestContext {
         ip_asn_db: conduit::ip_asn::new_cache(),
         engine_registry: conduit::engines::registry::new_registry(),
         event_bus: conduit::events::new_bus(),
+        hardlink_cache: Default::default(),
+        oidc_states: Default::default(),
     };
 
     let router = build_api_router(state);
@@ -724,6 +726,10 @@ async fn every_route_requires_credentials_unless_it_is_public_on_purpose() {
         "/api/ws",
         // Redeems a single-use, three-minute pairing code shown as a QR code by a signed-in user.
         "/api/auth/mobile/pair",
+        // OIDC/SSO discovery status, login redirect, and IdP callback (must be accessible pre-login).
+        "/api/auth/oidc/config",
+        "/api/auth/oidc/login",
+        "/api/auth/oidc/callback",
     ];
     let is_webhook = |p: &str| p.contains("inbound") || p.starts_with("/webhook/") || p.starts_with("/api/webhook");
 
@@ -906,4 +912,109 @@ async fn purge_history_now_requires_a_configured_retention_period() {
     // Not an admin route by accident.
     let anon = send_request(&ctx.router, Method::POST, "/api/settings/purge-history", None, None).await;
     assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_api_token_scope_enforcement() {
+    let ctx = setup_test_context().await;
+
+    // Create a read-only API token
+    let raw_token = "cnd_readonly_test_token_12345";
+    let token_hash = conduit::auth::hash_api_token(raw_token);
+    ctx.db
+        .create_api_token(
+            "ro-token",
+            &token_hash,
+            &["torrents:read".to_string(), "system:read".to_string()],
+            None,
+        )
+        .unwrap();
+
+    // Read endpoints succeed
+    let resp = send_request(&ctx.router, Method::GET, "/api/torrents", Some(raw_token), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = send_request(&ctx.router, Method::GET, "/api/stats/current", Some(raw_token), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Mutating torrent/sync/admin endpoints are forbidden (403)
+    let resp = send_request(
+        &ctx.router,
+        Method::POST,
+        "/api/torrents/bulk",
+        Some(raw_token),
+        Some(json!({"action": "start", "compound_ids": []})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let resp = send_request(
+        &ctx.router,
+        Method::POST,
+        "/api/sync/notify-download",
+        Some(raw_token),
+        Some(json!({"torrent_name": "test", "torrent_dir": "/tmp"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_settings_redaction_and_sync_cmd_validation() {
+    let ctx = setup_test_context().await;
+
+    // Seed secrets into config
+    let mut cfg = ctx.config_mgr.get().await;
+    let real_jwt = cfg.system.jwt_secret.clone();
+    cfg.sonarr.webhook_secret = Some("super-secret-sonarr".to_string());
+    ctx.config_mgr.update(cfg).await.unwrap();
+
+    // GET /api/settings must mask secrets
+    let resp = send_request(&ctx.router, Method::GET, "/api/settings", Some(&ctx.admin_token), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["system"]["jwt_secret"], conduit::config::SECRET_MASK);
+    assert_eq!(body["sonarr"]["webhook_secret"], conduit::config::SECRET_MASK);
+
+    // PUT /api/settings with masked values preserves real secrets
+    let resp = send_request(&ctx.router, Method::PUT, "/api/settings", Some(&ctx.admin_token), Some(body.clone())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let saved = ctx.config_mgr.get().await;
+    assert_eq!(saved.system.jwt_secret, real_jwt);
+    assert_eq!(saved.sonarr.webhook_secret.as_deref(), Some("super-secret-sonarr"));
+
+    // PUT /api/settings with disallowed sync_cmd returns 400
+    let mut bad_body = body;
+    bad_body["file_sync"]["sync_cmd"] = json!("sh -c 'id'");
+    let resp = send_request(&ctx.router, Method::PUT, "/api/settings", Some(&ctx.admin_token), Some(bad_body)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn test_rate_limiter_per_ip_and_pair() {
+    let rl = conduit::auth::RateLimiter::new();
+    for _ in 0..5 {
+        rl.record_login_failure("10.0.0.5", "alice");
+    }
+    // alice from 10.0.0.5 is locked out, but alice from 10.0.0.6 is not!
+    assert!(rl.check_login("10.0.0.5", "alice").is_err());
+    assert!(rl.check_login("10.0.0.6", "alice").is_ok());
+
+    // Password spraying 25 distinct usernames from 10.0.0.9 locks out the IP
+    for i in 0..25 {
+        rl.record_login_failure("10.0.0.9", &format!("user{}", i));
+    }
+    assert!(rl.check_login("10.0.0.9", "brand_new_user").is_err());
+}
+
+#[test]
+fn test_fetcher_registry_creates_clients() {
+    let reg = conduit::downloader::default_registry();
+    let cfg: conduit::config::FetcherNodeConfig = serde_json::from_value(json!({
+        "name": "test-tr",
+        "host": "127.0.0.1",
+        "client_type": "transmission"
+    }))
+    .unwrap();
+    let client = reg.create_client(cfg).expect("Transmission driver should be registered");
+    assert_eq!(client.node_name(), "test-tr");
 }

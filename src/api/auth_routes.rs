@@ -1,9 +1,10 @@
 // src/api/auth_routes.rs
 use crate::auth::{
     create_jwt, generate_totp_secret, get_otpauth_url, hash_api_token, hash_password,
-    verify_totp_code_at, CreatePairTokenResponse, MobilePairRequest, MobilePairResponse,
-    RateLimiter, RequireAdmin, RequireAuth, WsTicketStore,
+    verify_totp_code_at, AppState, ClientIp, CreatePairTokenResponse, MobilePairRequest,
+    MobilePairResponse, RateLimiter, RequireAdmin, RequireAuth, WsTicketStore,
 };
+use serde_json::Value;
 use crate::config::{ConfigManager, FetcherNodeConfig};
 use crate::db::{ApiTokenRecord, Database, UserRecord};
 use axum::{
@@ -211,10 +212,11 @@ pub async fn login(
     State(db): State<Database>,
     State(config_mgr): State<ConfigManager>,
     State(rate_limiter): State<RateLimiter>,
+    ClientIp(client_ip): ClientIp,
     headers_in: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    if let Err(retry_secs) = rate_limiter.check(&payload.username) {
+    if let Err(retry_secs) = rate_limiter.check_login(&client_ip, &payload.username) {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({"error": format!("Too many failed attempts. Try again in {} seconds.", retry_secs)})),
@@ -229,13 +231,13 @@ pub async fn login(
         None => {
             // Constant-time dummy verification to defeat username enumeration timing attacks
             let _ = crate::auth::verify_password_async(payload.password.clone(), crate::auth::DUMMY_ARGON2_HASH.to_string()).await;
-            rate_limiter.record_failure(&payload.username);
+            rate_limiter.record_login_failure(&client_ip, &payload.username);
             return Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid username or password"}))));
         }
     };
 
     if !crate::auth::verify_password_async(payload.password.clone(), user.password_hash.clone()).await {
-        rate_limiter.record_failure(&payload.username);
+        rate_limiter.record_login_failure(&client_ip, &payload.username);
         return Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid username or password"}))));
     }
 
@@ -256,7 +258,7 @@ pub async fn login(
                 match verify_totp_code_at(secret, code, user.totp_last_step) {
                     Some(step) if db.consume_totp_step(&user.id, step as i64).unwrap_or(false) => {}
                     _ => {
-                        rate_limiter.record_failure(&payload.username);
+                        rate_limiter.record_login_failure(&client_ip, &payload.username);
                         return Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid or already-used two-factor authentication passcode"}))));
                     }
                 }
@@ -264,7 +266,7 @@ pub async fn login(
         }
     }
 
-    rate_limiter.record_success(&payload.username);
+    rate_limiter.record_login_success(&client_ip, &payload.username);
 
     let config = config_mgr.get().await;
     let token = create_jwt(&user.id, &user.username, user.is_admin, user.token_version, &config.system.jwt_secret, 30)
@@ -362,6 +364,7 @@ pub async fn get_me(
             username: auth.0.username,
             password_hash: String::new(),
             is_admin: auth.0.is_admin,
+            role: auth.0.role,
             totp_enabled: false,
             totp_secret: None,
             token_version: 1,
@@ -454,6 +457,18 @@ pub async fn setup_2fa(
     auth: RequireAuth,
     State(db): State<Database>,
 ) -> Result<Json<Setup2FaResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let user = db
+        .get_user_by_id(&auth.0.user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "User not found"}))))?;
+
+    if user.totp_enabled {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "2FA is already enabled. Disable 2FA before re-enrolling."})),
+        ));
+    }
+
     let secret = generate_totp_secret();
     let otpauth_url = get_otpauth_url(&secret, &auth.0.username, "Conduit");
 
@@ -708,5 +723,271 @@ pub async fn redeem_mobile_pair(
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         ws_endpoint: "/api/ws".to_string(),
     }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct OidcPublicConfigResponse {
+    pub enabled: bool,
+    pub provider_name: String,
+}
+
+pub async fn get_oidc_config(State(state): State<AppState>) -> Json<OidcPublicConfigResponse> {
+    let cfg = state.config.get().await;
+    let enabled = cfg.oidc.enabled
+        && !cfg.oidc.issuer_url.trim().is_empty()
+        && !cfg.oidc.client_id.trim().is_empty();
+    Json(OidcPublicConfigResponse {
+        enabled,
+        provider_name: cfg.oidc.provider_name.clone(),
+    })
+}
+
+fn effective_oidc_redirect_uri(cfg: &crate::config::model::AppConfig, headers: &HeaderMap) -> String {
+    if !cfg.oidc.redirect_url.trim().is_empty() {
+        return cfg.oidc.redirect_url.trim().to_string();
+    }
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost:8787");
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(if cfg.system.ssl_enabled { "https" } else { "http" });
+    format!("{}://{}/api/auth/oidc/callback", proto, host)
+}
+
+pub async fn oidc_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<axum::response::Redirect, (StatusCode, Json<Value>)> {
+    let cfg = state.config.get().await;
+    if !cfg.oidc.enabled || cfg.oidc.issuer_url.trim().is_empty() || cfg.oidc.client_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "OIDC/SSO is not enabled or configured"})),
+        ));
+    }
+
+    let doc = crate::auth::oidc::discover_endpoints(crate::api::shared_http_client(), &cfg.oidc.issuer_url)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({"error": e.to_string()}))))?;
+
+    let state_tok = crate::auth::oidc::random_urlsafe_token(24);
+    let nonce = crate::auth::oidc::random_urlsafe_token(24);
+    let (verifier, challenge) = crate::auth::oidc::generate_pkce_pair();
+    state.oidc_states.insert(
+        state_tok.clone(),
+        crate::auth::oidc::OidcPendingAuth {
+            code_verifier: verifier,
+            nonce: nonce.clone(),
+            created_at: std::time::Instant::now(),
+        },
+    );
+
+    let redirect_uri = effective_oidc_redirect_uri(&cfg, &headers);
+    let scopes = if cfg.oidc.scopes.trim().is_empty() {
+        "openid profile email"
+    } else {
+        cfg.oidc.scopes.trim()
+    };
+
+    let sep = if doc.authorization_endpoint.contains('?') { '&' } else { '?' };
+    let auth_url = format!(
+        "{}{}response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&nonce={}&code_challenge={}&code_challenge_method=S256",
+        doc.authorization_endpoint,
+        sep,
+        urlencoding::encode(&cfg.oidc.client_id),
+        urlencoding::encode(&redirect_uri),
+        urlencoding::encode(scopes),
+        urlencoding::encode(&state_tok),
+        urlencoding::encode(&nonce),
+        urlencoding::encode(&challenge),
+    );
+
+    Ok(axum::response::Redirect::temporary(&auth_url))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OidcCallbackQuery {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+pub async fn oidc_callback(
+    State(state): State<AppState>,
+    headers_in: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<OidcCallbackQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
+    if let Some(err) = query.error {
+        let desc = query.error_description.unwrap_or_default();
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": err, "detail": desc})),
+        ));
+    }
+
+    let code = query.code.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({"error": "Missing OIDC authorization code"})))
+    })?;
+    let state_tok = query.state.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(json!({"error": "Missing OIDC state"})))
+    })?;
+
+    let pending = state.oidc_states.take(&state_tok).ok_or_else(|| {
+        (StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid or expired OIDC state"})))
+    })?;
+
+    let cfg = state.config.get().await;
+    if !cfg.oidc.enabled {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "OIDC is disabled"}))));
+    }
+
+    let doc = crate::auth::oidc::discover_endpoints(crate::api::shared_http_client(), &cfg.oidc.issuer_url)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({"error": e.to_string()}))))?;
+
+    let redirect_uri = effective_oidc_redirect_uri(&cfg, &headers_in);
+    let (username, role) = crate::auth::oidc::exchange_code_for_user(
+        crate::api::shared_http_client(),
+        &cfg.oidc,
+        &doc,
+        &code,
+        &pending.code_verifier,
+        &pending.nonce,
+        &redirect_uri,
+    )
+    .await
+    .map_err(|e| (StatusCode::UNAUTHORIZED, Json(json!({"error": e.to_string()}))))?;
+
+    let user = if cfg.oidc.auto_provision_users {
+        state
+            .db
+            .get_or_create_oidc_user(&username, &role)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
+    } else {
+        state
+            .db
+            .get_user_by_username(&username)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
+            .ok_or_else(|| {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "User does not exist and OIDC auto-provisioning is disabled"})),
+                )
+            })?
+    };
+
+    let jwt = crate::auth::create_jwt(
+        &user.id,
+        &user.username,
+        user.is_admin,
+        user.token_version,
+        &cfg.system.jwt_secret,
+        30,
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    let _ = state.db.log_event(
+        "auth",
+        "info",
+        &format!("OIDC user '{}' signed in (role: {})", user.username, user.role),
+        None,
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        format!(
+            "conduit_session={}; Path=/; HttpOnly; SameSite=Strict;{} Max-Age={}",
+            jwt,
+            secure_cookie_attr(&headers_in),
+            30 * 86400
+        )
+        .parse()
+        .unwrap(),
+    );
+
+    Ok((headers, axum::response::Redirect::temporary("/")))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserRequest {
+    pub username: String,
+    pub password: String,
+    #[serde(default = "default_role_viewer")]
+    pub role: String,
+}
+
+fn default_role_viewer() -> String {
+    "viewer".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateUserRoleRequest {
+    pub role: String,
+}
+
+pub async fn list_users(
+    _admin: RequireAdmin,
+    State(db): State<Database>,
+) -> Result<Json<Vec<UserRecord>>, (StatusCode, Json<Value>)> {
+    db.list_users()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))
+}
+
+pub async fn create_user_admin(
+    _admin: RequireAdmin,
+    State(db): State<Database>,
+    Json(req): Json<CreateUserRequest>,
+) -> Result<(StatusCode, Json<UserRecord>), (StatusCode, Json<Value>)> {
+    let username = req.username.trim();
+    if username.is_empty() || req.password.len() < 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Username required and password must be at least 8 characters"})),
+        ));
+    }
+    let hash = crate::auth::hash_password(&req.password)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let user = db
+        .create_user_with_role(username, &hash, &req.role)
+        .map_err(|e| (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))))?;
+    Ok((StatusCode::CREATED, Json(user)))
+}
+
+pub async fn update_user_role_admin(
+    _admin: RequireAdmin,
+    State(db): State<Database>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<UpdateUserRoleRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match db.update_user_role(&id, &req.role) {
+        Ok(true) => Ok(Json(json!({"status": "updated", "role": crate::db::normalize_role(&req.role)}))),
+        Ok(false) => Err((StatusCode::NOT_FOUND, Json(json!({"error": "User not found"})))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()})))),
+    }
+}
+
+pub async fn delete_user_admin(
+    admin: RequireAdmin,
+    State(db): State<Database>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if admin.0.user_id == id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Cannot delete your own active account"})),
+        ));
+    }
+    match db.delete_user(&id) {
+        Ok(true) => Ok(Json(json!({"status": "deleted"}))),
+        Ok(false) => Err((StatusCode::NOT_FOUND, Json(json!({"error": "User not found"})))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()})))),
+    }
 }
 

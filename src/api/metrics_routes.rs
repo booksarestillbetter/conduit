@@ -1,5 +1,5 @@
 // src/api/metrics_routes.rs
-use crate::auth::{AppState, OptionalAuth, RequireAuth};
+use crate::auth::{AppState, OptionalAuth, RequireRead, RequireTorrentsWrite};
 use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
 use serde_json::json;
@@ -122,19 +122,18 @@ pub async fn prometheus_metrics(State(state): State<AppState>, OptionalAuth(auth
     }
 
     // 6. Host Hardware Metrics
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    let (cpu_cores, total_mem, used_mem, _cpu_pct) = sample_host_metrics();
     output.push_str("# HELP conduit_host_cpu_cores Number of CPU cores on host\n");
     output.push_str("# TYPE conduit_host_cpu_cores gauge\n");
-    output.push_str(&format!("conduit_host_cpu_cores {}\n", sys.cpus().len()));
+    output.push_str(&format!("conduit_host_cpu_cores {}\n", cpu_cores));
 
     output.push_str("# HELP conduit_host_memory_total_bytes Total physical RAM in bytes\n");
     output.push_str("# TYPE conduit_host_memory_total_bytes gauge\n");
-    output.push_str(&format!("conduit_host_memory_total_bytes {}\n", sys.total_memory()));
+    output.push_str(&format!("conduit_host_memory_total_bytes {}\n", total_mem));
 
     output.push_str("# HELP conduit_host_memory_used_bytes Used physical RAM in bytes\n");
     output.push_str("# TYPE conduit_host_memory_used_bytes gauge\n");
-    output.push_str(&format!("conduit_host_memory_used_bytes {}\n", sys.used_memory()));
+    output.push_str(&format!("conduit_host_memory_used_bytes {}\n", used_mem));
 
     output.push_str("# HELP conduit_host_uptime_seconds System uptime in seconds\n");
     output.push_str("# TYPE conduit_host_uptime_seconds gauge\n");
@@ -147,6 +146,21 @@ pub async fn prometheus_metrics(State(state): State<AppState>, OptionalAuth(auth
         .into_response()
 }
 
+static HOST_SYSINFO: std::sync::OnceLock<parking_lot::Mutex<System>> = std::sync::OnceLock::new();
+
+fn sample_host_metrics() -> (usize, u64, u64, f32) {
+    let lock = HOST_SYSINFO.get_or_init(|| parking_lot::Mutex::new(System::new()));
+    let mut sys = lock.lock();
+    sys.refresh_memory();
+    sys.refresh_cpu_all();
+    (
+        sys.cpus().len(),
+        sys.total_memory(),
+        sys.used_memory(),
+        sys.global_cpu_usage(),
+    )
+}
+
 #[utoipa::path(
     get,
     path = "/api/system/stats",
@@ -157,15 +171,14 @@ pub async fn prometheus_metrics(State(state): State<AppState>, OptionalAuth(auth
         (status = 200, description = "Host hardware telemetry", body = HostSystemStats)
     )
 )]
-pub async fn get_system_stats(_auth: RequireAuth) -> Result<Json<HostSystemStats>, StatusCode> {
-    let mut sys = System::new_all();
-    sys.refresh_all();
+pub async fn get_system_stats(_auth: RequireRead) -> Result<Json<HostSystemStats>, StatusCode> {
+    let (cpu_count, total_memory_bytes, used_memory_bytes, _) = sample_host_metrics();
 
     Ok(Json(HostSystemStats {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        cpu_count: sys.cpus().len(),
-        total_memory_bytes: sys.total_memory(),
-        used_memory_bytes: sys.used_memory(),
+        cpu_count,
+        total_memory_bytes,
+        used_memory_bytes,
         uptime_secs: System::uptime(),
     }))
 }
@@ -180,7 +193,7 @@ pub async fn get_system_stats(_auth: RequireAuth) -> Result<Json<HostSystemStats
         (status = 200, description = "Cluster and tracker health telemetry", body = crate::fetcher::SystemHealthOverview)
     )
 )]
-pub async fn get_system_health(_auth: RequireAuth, State(state): State<AppState>) -> Result<Json<crate::fetcher::SystemHealthOverview>, StatusCode> {
+pub async fn get_system_health(_auth: RequireRead, State(state): State<AppState>) -> Result<Json<crate::fetcher::SystemHealthOverview>, StatusCode> {
     let overview = state.fetcher_pool.get_system_health();
     Ok(Json(overview))
 }
@@ -224,7 +237,7 @@ fn passive_owner_nodes(pool: &crate::fetcher::FetcherPool, host: &str) -> Option
     )
 )]
 pub async fn force_trip_circuit_breaker(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(state): State<AppState>,
     Path(host): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -286,7 +299,7 @@ pub async fn force_trip_circuit_breaker(
     )
 )]
 pub async fn force_reset_circuit_breaker(
-    _auth: RequireAuth,
+    _auth: RequireTorrentsWrite,
     State(state): State<AppState>,
     Path(host): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -327,7 +340,7 @@ pub async fn force_reset_circuit_breaker(
         (status = 200, description = "Background engine health snapshot", body = [crate::engines::registry::EngineStatus])
     )
 )]
-pub async fn get_engine_health(_auth: RequireAuth, State(state): State<AppState>) -> Result<Json<Vec<crate::engines::registry::EngineStatus>>, StatusCode> {
+pub async fn get_engine_health(_auth: RequireRead, State(state): State<AppState>) -> Result<Json<Vec<crate::engines::registry::EngineStatus>>, StatusCode> {
     Ok(Json(crate::engines::registry::snapshot(&state.engine_registry)))
 }
 
@@ -349,7 +362,7 @@ pub struct CrashLogResponse {
         (status = 401, description = "Unauthorized")
     )
 )]
-pub async fn get_crash_log(_auth: RequireAuth, State(state): State<AppState>) -> Result<Json<CrashLogResponse>, StatusCode> {
+pub async fn get_crash_log(_auth: RequireRead, State(state): State<AppState>) -> Result<Json<CrashLogResponse>, StatusCode> {
     let cfg = state.config.get().await;
     let crash_file = std::path::Path::new(&cfg.system.data_dir).join("crash.log");
     let crash_file_path = crash_file.to_string_lossy().to_string();
@@ -374,5 +387,28 @@ pub async fn get_crash_log(_auth: RequireAuth, State(state): State<AppState>) ->
             crash_file_path,
         }))
     }
+}
+
+pub async fn get_hardlink_health(
+    _auth: RequireRead,
+    State(state): State<AppState>,
+) -> Json<crate::engines::hardlink_checker::HardlinkHealthReport> {
+    if let Some(cached) = state.hardlink_cache.get().await {
+        return Json(cached);
+    }
+    let cfg = state.config.get().await;
+    let report = crate::engines::hardlink_checker::scan_hardlink_health(&cfg).await;
+    state.hardlink_cache.set(report.clone()).await;
+    Json(report)
+}
+
+pub async fn scan_hardlinks_now(
+    _auth: crate::auth::RequireTorrentsWrite,
+    State(state): State<AppState>,
+) -> Json<crate::engines::hardlink_checker::HardlinkHealthReport> {
+    let cfg = state.config.get().await;
+    let report = crate::engines::hardlink_checker::scan_hardlink_health(&cfg).await;
+    state.hardlink_cache.set(report.clone()).await;
+    Json(report)
 }
 

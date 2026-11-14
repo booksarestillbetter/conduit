@@ -1,5 +1,5 @@
 // src/api/stats_routes.rs
-use crate::auth::{AppState, RequireAuth};
+use crate::auth::{AppState, RequireRead};
 use crate::db::Database;
 use crate::stats::{self, PeerClientSnapshot, StatsSnapshot};
 use axum::extract::{Query, State};
@@ -26,7 +26,7 @@ pub struct StatsHistoryQueryParams {
         (status = 401, description = "Unauthorized")
     )
 )]
-pub async fn get_current_stats(_auth: RequireAuth, State(state): State<AppState>) -> Json<StatsSnapshot> {
+pub async fn get_current_stats(_auth: RequireRead, State(state): State<AppState>) -> Json<StatsSnapshot> {
     Json(stats::compute_stats_snapshot(&state.fetcher_pool, &state.db))
 }
 
@@ -43,13 +43,13 @@ pub async fn get_current_stats(_auth: RequireAuth, State(state): State<AppState>
     )
 )]
 pub async fn get_stats_history(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(db): State<Database>,
     Query(params): Query<StatsHistoryQueryParams>,
 ) -> Result<Json<Vec<StatsSnapshot>>, StatusCode> {
     let hours = params.hours.unwrap_or(24).clamp(1, 720) as i64;
     let since_ms = chrono::Utc::now().timestamp_millis() - hours * 3600 * 1000;
-    let history = db.list_stats_history(since_ms).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let history = db.list_stats_history_async(since_ms).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(history))
 }
 
@@ -66,12 +66,12 @@ pub async fn get_stats_history(
     )
 )]
 pub async fn get_peer_client_history(
-    _auth: RequireAuth,
+    _auth: RequireRead,
     State(db): State<Database>,
     Query(params): Query<StatsHistoryQueryParams>,
 ) -> Result<Json<Vec<PeerClientSnapshot>>, StatusCode> {
     let hours = params.hours.unwrap_or(24).clamp(1, 720) as i64;
     let since_ms = chrono::Utc::now().timestamp_millis() - hours * 3600 * 1000;
-    let history = db.list_peer_client_history(since_ms).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let history = db.list_peer_client_history_async(since_ms).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(history))
 }

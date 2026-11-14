@@ -88,6 +88,8 @@ async fn test_four_tier_classification_pipeline() {
         ip_asn_db: conduit::ip_asn::new_cache(),
         engine_registry: conduit::engines::registry::new_registry(),
         event_bus: conduit::events::new_bus(),
+        hardlink_cache: Default::default(),
+        oidc_states: Default::default(),
     };
 
     let router = build_api_router(state);

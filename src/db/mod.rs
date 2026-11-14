@@ -8,10 +8,12 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+pub type ArrGrabsLookupMap = Arc<std::collections::HashMap<String, ArrGrabRecord>>;
+
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
-    arr_grabs_cache: Arc<parking_lot::RwLock<Option<std::collections::HashMap<String, ArrGrabRecord>>>>,
+    arr_grabs_cache: Arc<parking_lot::RwLock<Option<ArrGrabsLookupMap>>>,
     db_path: Arc<parking_lot::RwLock<Option<std::path::PathBuf>>>,
     /// Set once at startup via `set_event_bus` (after `init()`, once the bus exists) — `None`
     /// until then, e.g. in tests that construct a `Database` without wiring one up.
@@ -25,6 +27,8 @@ pub struct UserRecord {
     #[serde(skip_serializing)]
     pub password_hash: String,
     pub is_admin: bool,
+    #[serde(default = "default_user_role")]
+    pub role: String,
     #[serde(default)]
     pub totp_enabled: bool,
     #[serde(skip_serializing)]
@@ -34,6 +38,19 @@ pub struct UserRecord {
     #[serde(default, skip_serializing)]
     pub totp_last_step: i64,
     pub created_at: DateTime<Utc>,
+}
+
+fn default_user_role() -> String {
+    "admin".to_string()
+}
+
+pub fn normalize_role(role: &str) -> &'static str {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "admin" => "admin",
+        "operator" => "operator",
+        "requester" => "requester",
+        _ => "viewer",
+    }
 }
 
 fn default_token_version() -> i64 {
@@ -262,6 +279,7 @@ impl Database {
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 1,
+                role TEXT NOT NULL DEFAULT 'admin',
                 totp_secret TEXT,
                 totp_enabled INTEGER NOT NULL DEFAULT 0,
                 token_version INTEGER NOT NULL DEFAULT 1,
@@ -330,6 +348,12 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_arr_grabs_rel ON arr_grabs(release_title);
             CREATE INDEX IF NOT EXISTS idx_arr_grabs_title ON arr_grabs(title);
             CREATE INDEX IF NOT EXISTS idx_arr_grabs_hash ON arr_grabs(download_id);
+            CREATE INDEX IF NOT EXISTS idx_arr_grabs_scene_nocase ON arr_grabs(scene_name COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_arr_grabs_rel_nocase ON arr_grabs(release_title COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_arr_grabs_title_nocase ON arr_grabs(title COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_arr_grabs_hash_nocase ON arr_grabs(download_id COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_arr_grabs_created ON arr_grabs(created_at);
+            CREATE INDEX IF NOT EXISTS idx_arr_grabs_zone ON arr_grabs(zone_id);
 
             CREATE TABLE IF NOT EXISTS event_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -432,6 +456,7 @@ impl Database {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_arr_grab_history_grab_id ON arr_grab_history(grab_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_arr_grab_history_created ON arr_grab_history(created_at);
 
             -- One row per minute, one-minute-average of the in-memory 1s bandwidth samples
             -- (see transmission::pool::FetcherPool's 5-minute ring buffer) — lets the
@@ -493,6 +518,8 @@ impl Database {
         let _ = conn.execute("ALTER TABLE arr_grabs ADD COLUMN zone_id TEXT", []);
         let _ = conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1", []);
         let _ = conn.execute("ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'", []);
+        let _ = conn.execute("UPDATE users SET role = 'viewer' WHERE is_admin = 0 AND role = 'admin'", []);
         let _ = conn.execute("ALTER TABLE plex_scrobbles ADD COLUMN source_node_name TEXT", []);
         let _ = conn.execute("ALTER TABLE circuit_breakers ADD COLUMN state TEXT NOT NULL DEFAULT 'tripped'", []);
         let _ = conn.execute("ALTER TABLE circuit_breakers ADD COLUMN recovery_started_at INTEGER", []);
@@ -587,14 +614,21 @@ impl Database {
     }
 
     pub fn create_user(&self, username: &str, password_hash: &str, is_admin: bool) -> anyhow::Result<UserRecord> {
+        let role = if is_admin { "admin" } else { "viewer" };
+        self.create_user_with_role(username, password_hash, role)
+    }
+
+    pub fn create_user_with_role(&self, username: &str, password_hash: &str, role: &str) -> anyhow::Result<UserRecord> {
         let conn = self.conn.lock();
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let now_str = now.to_rfc3339();
+        let norm_role = normalize_role(role).to_string();
+        let is_admin = norm_role == "admin";
 
         conn.execute(
-            "INSERT INTO users (id, username, password_hash, is_admin, totp_enabled, token_version, totp_last_step, created_at) VALUES (?1, ?2, ?3, ?4, 0, 1, 0, ?5)",
-            params![id, username, password_hash, is_admin as i32, now_str],
+            "INSERT INTO users (id, username, password_hash, is_admin, role, totp_enabled, token_version, totp_last_step, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, 0, ?6)",
+            params![id, username, password_hash, is_admin as i32, norm_role, now_str],
         )?;
 
         Ok(UserRecord {
@@ -602,6 +636,7 @@ impl Database {
             username: username.to_string(),
             password_hash: password_hash.to_string(),
             is_admin,
+            role: norm_role,
             totp_enabled: false,
             totp_secret: None,
             token_version: 1,
@@ -610,52 +645,106 @@ impl Database {
         })
     }
 
+    fn map_user_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
+        let created_str: String = row.get(4)?;
+        let created_at = DateTime::parse_from_rfc3339(&created_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        let is_admin = row.get::<_, i32>(3)? != 0;
+        let raw_role: String = row.get::<_, String>(9).unwrap_or_else(|_| {
+            if is_admin { "admin".to_string() } else { "viewer".to_string() }
+        });
+        let role = if is_admin && raw_role != "admin" {
+            "admin".to_string()
+        } else {
+            normalize_role(&raw_role).to_string()
+        };
+        Ok(UserRecord {
+            id: row.get(0)?,
+            username: row.get(1)?,
+            password_hash: row.get(2)?,
+            is_admin: role == "admin",
+            role,
+            created_at,
+            totp_enabled: row.get::<_, i32>(5)? != 0,
+            totp_secret: row.get(6)?,
+            token_version: row.get(7).unwrap_or(1),
+            totp_last_step: row.get(8).unwrap_or(0),
+        })
+    }
+
     pub fn get_user_by_username(&self, username: &str) -> anyhow::Result<Option<UserRecord>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT id, username, password_hash, is_admin, created_at, totp_enabled, totp_secret, token_version, totp_last_step FROM users WHERE username = ?1")?;
-        let user = stmt.query_row(params![username], |row| {
-            let created_str: String = row.get(4)?;
-            let created_at = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            Ok(UserRecord {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                password_hash: row.get(2)?,
-                is_admin: row.get::<_, i32>(3)? != 0,
-                created_at,
-                totp_enabled: row.get::<_, i32>(5)? != 0,
-                totp_secret: row.get(6)?,
-                token_version: row.get(7).unwrap_or(1),
-                totp_last_step: row.get(8).unwrap_or(0),
-            })
-        }).optional()?;
-
+        let mut stmt = conn.prepare("SELECT id, username, password_hash, is_admin, created_at, totp_enabled, totp_secret, token_version, totp_last_step, role FROM users WHERE username = ?1")?;
+        let user = stmt.query_row(params![username], Self::map_user_row).optional()?;
         Ok(user)
     }
 
     pub fn get_user_by_id(&self, id: &str) -> anyhow::Result<Option<UserRecord>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT id, username, password_hash, is_admin, created_at, totp_enabled, totp_secret, token_version, totp_last_step FROM users WHERE id = ?1")?;
-        let user = stmt.query_row(params![id], |row| {
-            let created_str: String = row.get(4)?;
-            let created_at = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            Ok(UserRecord {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                password_hash: row.get(2)?,
-                is_admin: row.get::<_, i32>(3)? != 0,
-                created_at,
-                totp_enabled: row.get::<_, i32>(5)? != 0,
-                totp_secret: row.get(6)?,
-                token_version: row.get(7).unwrap_or(1),
-                totp_last_step: row.get(8).unwrap_or(0),
-            })
-        }).optional()?;
-
+        let mut stmt = conn.prepare("SELECT id, username, password_hash, is_admin, created_at, totp_enabled, totp_secret, token_version, totp_last_step, role FROM users WHERE id = ?1")?;
+        let user = stmt.query_row(params![id], Self::map_user_row).optional()?;
         Ok(user)
+    }
+
+    pub fn list_users(&self) -> anyhow::Result<Vec<UserRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT id, username, password_hash, is_admin, created_at, totp_enabled, totp_secret, token_version, totp_last_step, role FROM users ORDER BY created_at ASC")?;
+        let rows = stmt.query_map([], Self::map_user_row)?;
+        let mut users = Vec::new();
+        for r in rows {
+            users.push(r?);
+        }
+        Ok(users)
+    }
+
+    pub fn update_user_role(&self, id: &str, role: &str) -> anyhow::Result<bool> {
+        let norm = normalize_role(role);
+        let is_admin = norm == "admin";
+        let conn = self.conn.lock();
+        if !is_admin {
+            // Prevent demoting the last admin
+            let admin_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND id != ?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            if admin_count == 0 {
+                anyhow::bail!("Cannot demote the last admin user");
+            }
+        }
+        let changed = conn.execute(
+            "UPDATE users SET role = ?1, is_admin = ?2, token_version = token_version + 1 WHERE id = ?3",
+            params![norm, is_admin as i32, id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn delete_user(&self, id: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock();
+        let is_target_admin: Option<i32> = conn
+            .query_row("SELECT is_admin FROM users WHERE id = ?1", params![id], |r| r.get(0))
+            .optional()?;
+        if is_target_admin == Some(1) {
+            let other_admins: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND id != ?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            if other_admins == 0 {
+                anyhow::bail!("Cannot delete the last admin user");
+            }
+        }
+        let changed = conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
+    }
+
+    pub fn get_or_create_oidc_user(&self, username: &str, role: &str) -> anyhow::Result<UserRecord> {
+        if let Some(existing) = self.get_user_by_username(username)? {
+            return Ok(existing);
+        }
+        // Unusable password hash prevents password-based login for OIDC-provisioned accounts
+        self.create_user_with_role(username, "!oidc!", role)
     }
 
     pub fn increment_user_token_version(&self, id: &str) -> anyhow::Result<()> {
@@ -1289,9 +1378,9 @@ impl Database {
         Ok(affected)
     }
 
-    pub fn get_arr_grabs_lookup_map(&self) -> std::collections::HashMap<String, ArrGrabRecord> {
+    pub fn get_arr_grabs_lookup_map(&self) -> Arc<std::collections::HashMap<String, ArrGrabRecord>> {
         if let Some(cached) = self.arr_grabs_cache.read().as_ref() {
-            return cached.clone();
+            return Arc::clone(cached);
         }
 
         // Prevent lock-order inversion deadlock (conn.lock vs arr_grabs_cache.write):
@@ -1311,12 +1400,12 @@ impl Database {
                  ORDER BY created_at ASC"
             ) {
                 Ok(s) => s,
-                Err(_) => return map,
+                Err(_) => return Arc::new(map),
             };
 
             let rows = match stmt.query_map([], Self::map_arr_grab_row) {
                 Ok(r) => r,
-                Err(_) => return map,
+                Err(_) => return Arc::new(map),
             };
 
             for row in rows.flatten() {
@@ -1362,8 +1451,9 @@ impl Database {
             map
         };
 
-        *self.arr_grabs_cache.write() = Some(map.clone());
-        map
+        let arc_map = Arc::new(map);
+        *self.arr_grabs_cache.write() = Some(Arc::clone(&arc_map));
+        arc_map
     }
 
     pub fn find_arr_grab_by_hash_or_name(&self, hash_or_download_id: &str, torrent_name: &str) -> anyhow::Result<Option<ArrGrabRecord>> {
@@ -1799,35 +1889,66 @@ impl Database {
 
     /// Returns stats snapshots from the last `since_ms` milliseconds, oldest first.
     pub fn list_stats_history(&self, since_ms: i64) -> anyhow::Result<Vec<crate::stats::StatsSnapshot>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT time, total_torrents, total_size_bytes, total_seeders, total_leechers,
-                    total_download_speed, total_upload_speed, by_node, by_tracker, by_media_type
-             FROM stats_history WHERE time >= ?1 ORDER BY time ASC",
-        )?;
-        let rows = stmt.query_map(params![since_ms], |row| {
-            let by_node: String = row.get(7)?;
-            let by_tracker: String = row.get(8)?;
-            let by_media_type: String = row.get(9)?;
-            let total_torrents: i64 = row.get(1)?;
-            Ok(crate::stats::StatsSnapshot {
-                time: row.get(0)?,
-                total_torrents: total_torrents as usize,
-                total_size_bytes: row.get(2)?,
-                total_seeders: row.get(3)?,
-                total_leechers: row.get(4)?,
-                total_download_speed: row.get(5)?,
-                total_upload_speed: row.get(6)?,
-                by_node: serde_json::from_str(&by_node).unwrap_or_default(),
-                by_tracker: serde_json::from_str(&by_tracker).unwrap_or_default(),
-                by_media_type: serde_json::from_str(&by_media_type).unwrap_or_default(),
-            })
-        })?;
-        let mut list = Vec::new();
-        for r in rows {
-            list.push(r?);
+        struct RawStatsRow {
+            time: i64,
+            total_torrents: i64,
+            total_size_bytes: i64,
+            total_seeders: i64,
+            total_leechers: i64,
+            total_download_speed: i64,
+            total_upload_speed: i64,
+            by_node: String,
+            by_tracker: String,
+            by_media_type: String,
         }
-        Ok(list)
+        let raw_rows: Vec<RawStatsRow> = {
+            let conn = self.conn.lock();
+            let mut stmt = conn.prepare(
+                "SELECT time, total_torrents, total_size_bytes, total_seeders, total_leechers,
+                        total_download_speed, total_upload_speed, by_node, by_tracker, by_media_type
+                 FROM stats_history WHERE time >= ?1 ORDER BY time ASC",
+            )?;
+            let rows = stmt.query_map(params![since_ms], |row| {
+                Ok(RawStatsRow {
+                    time: row.get(0)?,
+                    total_torrents: row.get(1)?,
+                    total_size_bytes: row.get(2)?,
+                    total_seeders: row.get(3)?,
+                    total_leechers: row.get(4)?,
+                    total_download_speed: row.get(5)?,
+                    total_upload_speed: row.get(6)?,
+                    by_node: row.get(7)?,
+                    by_tracker: row.get(8)?,
+                    by_media_type: row.get(9)?,
+                })
+            })?;
+            let mut raw = Vec::new();
+            for r in rows {
+                raw.push(r?);
+            }
+            raw
+        };
+
+        Ok(raw_rows
+            .into_iter()
+            .map(|r| crate::stats::StatsSnapshot {
+                time: r.time,
+                total_torrents: r.total_torrents as usize,
+                total_size_bytes: r.total_size_bytes,
+                total_seeders: r.total_seeders,
+                total_leechers: r.total_leechers,
+                total_download_speed: r.total_download_speed,
+                total_upload_speed: r.total_upload_speed,
+                by_node: serde_json::from_str(&r.by_node).unwrap_or_default(),
+                by_tracker: serde_json::from_str(&r.by_tracker).unwrap_or_default(),
+                by_media_type: serde_json::from_str(&r.by_media_type).unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    pub async fn list_stats_history_async(&self, since_ms: i64) -> anyhow::Result<Vec<crate::stats::StatsSnapshot>> {
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || db.list_stats_history(since_ms)).await?
     }
 
     /// Inserts one peer-client sample and prunes anything older than 30 days, same shape as
@@ -1849,22 +1970,30 @@ impl Database {
     /// endpoint for this one, since computing it fresh is the expensive path (see
     /// `stats::sample_peer_clients`).
     pub fn list_peer_client_history(&self, since_ms: i64) -> anyhow::Result<Vec<crate::stats::PeerClientSnapshot>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT time, by_client FROM stats_peer_clients WHERE time >= ?1 ORDER BY time ASC",
-        )?;
-        let rows = stmt.query_map(params![since_ms], |row| {
-            let by_client: String = row.get(1)?;
-            Ok(crate::stats::PeerClientSnapshot {
-                time: row.get(0)?,
+        let raw_rows: Vec<(i64, String)> = {
+            let conn = self.conn.lock();
+            let mut stmt = conn.prepare(
+                "SELECT time, by_client FROM stats_peer_clients WHERE time >= ?1 ORDER BY time ASC",
+            )?;
+            let rows = stmt.query_map(params![since_ms], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let mut raw = Vec::new();
+            for r in rows {
+                raw.push(r?);
+            }
+            raw
+        };
+        Ok(raw_rows
+            .into_iter()
+            .map(|(time, by_client)| crate::stats::PeerClientSnapshot {
+                time,
                 by_client: serde_json::from_str(&by_client).unwrap_or_default(),
             })
-        })?;
-        let mut list = Vec::new();
-        for r in rows {
-            list.push(r?);
-        }
-        Ok(list)
+            .collect())
+    }
+
+    pub async fn list_peer_client_history_async(&self, since_ms: i64) -> anyhow::Result<Vec<crate::stats::PeerClientSnapshot>> {
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || db.list_peer_client_history(since_ms)).await?
     }
 
     // --- Data Retention ---
@@ -1887,6 +2016,27 @@ impl Database {
             ombi_requests,
             arr_grab_history,
         })
+    }
+
+    pub async fn list_pipeline_items_async(
+        &self,
+        limit: usize,
+        app_filter: Option<String>,
+        status_filter: Option<String>,
+        search: Option<String>,
+        zone_filter: Option<String>,
+    ) -> anyhow::Result<Vec<ArrGrabRecord>> {
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || {
+            db.list_pipeline_items(
+                limit,
+                app_filter.as_deref(),
+                status_filter.as_deref(),
+                search.as_deref(),
+                zone_filter.as_deref(),
+            )
+        })
+        .await?
     }
 
     // --- Event Logs ---

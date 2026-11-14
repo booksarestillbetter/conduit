@@ -51,6 +51,12 @@ pub struct AppConfig {
     pub zones: Vec<ZoneConfig>,
     #[serde(default)]
     pub ip_asn: IpAsnConfig,
+    #[serde(default)]
+    pub hardlink_checker: HardlinkCheckerConfig,
+    #[serde(default)]
+    pub oidc: OidcConfig,
+    #[serde(default)]
+    pub offsite_backup: OffsiteBackupConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1086,6 +1092,334 @@ impl Default for TrackerCircuitBreakerConfig {
             initial_backoff_secs: default_cb_initial_backoff_secs(),
             recovery_ramp_secs: default_cb_recovery_ramp_secs(),
             recovery_success_threshold: default_cb_recovery_success_threshold(),
+        }
+    }
+}
+
+pub const SECRET_MASK: &str = "••••••••";
+
+fn mask_str(s: &mut String) {
+    if !s.is_empty() {
+        *s = SECRET_MASK.to_string();
+    }
+}
+
+fn mask_opt(opt: &mut Option<String>) {
+    if let Some(ref mut s) = opt {
+        if !s.is_empty() {
+            *s = SECRET_MASK.to_string();
+        }
+    }
+}
+
+fn restore_str(curr: &mut String, prev: &str) {
+    if curr == SECRET_MASK {
+        *curr = prev.to_string();
+    }
+}
+
+fn restore_opt(curr: &mut Option<String>, prev: &Option<String>) {
+    if curr.as_deref() == Some(SECRET_MASK) {
+        *curr = prev.clone();
+    }
+}
+
+fn mask_notification_channel(ch: &mut NotificationChannel) {
+    match ch {
+        NotificationChannel::Mattermost(m) => {
+            mask_opt(&mut m.bot_token);
+            mask_str(&mut m.webhook_url);
+        }
+        NotificationChannel::Discord(d) => {
+            mask_str(&mut d.webhook_url);
+        }
+        NotificationChannel::Pushover(p) => {
+            mask_str(&mut p.api_token);
+        }
+        NotificationChannel::Webhook(w) => {
+            mask_opt(&mut w.secret);
+        }
+    }
+}
+
+fn restore_notification_channel(curr: &mut NotificationChannel, prev: &NotificationChannel) {
+    match (curr, prev) {
+        (NotificationChannel::Mattermost(c), NotificationChannel::Mattermost(p)) => {
+            restore_opt(&mut c.bot_token, &p.bot_token);
+            restore_str(&mut c.webhook_url, &p.webhook_url);
+        }
+        (NotificationChannel::Discord(c), NotificationChannel::Discord(p)) => {
+            restore_str(&mut c.webhook_url, &p.webhook_url);
+        }
+        (NotificationChannel::Pushover(c), NotificationChannel::Pushover(p)) => {
+            restore_str(&mut c.api_token, &p.api_token);
+        }
+        (NotificationChannel::Webhook(c), NotificationChannel::Webhook(p)) => {
+            restore_opt(&mut c.secret, &p.secret);
+        }
+        _ => {}
+    }
+}
+
+impl AppConfig {
+    /// Return a clone with all secret/credential fields replaced by [`SECRET_MASK`]
+    /// for safe exposure over `GET /api/settings`.
+    pub fn redacted(&self) -> Self {
+        let mut out = self.clone();
+        mask_str(&mut out.system.jwt_secret);
+        for node in out.nodes.values_mut() {
+            mask_opt(&mut node.password);
+        }
+        for zone in &mut out.zones {
+            mask_opt(&mut zone.webhook_secret);
+        }
+        mask_opt(&mut out.sonarr.webhook_secret);
+        if let Some(ref mut p) = out.sonarr.primary {
+            mask_str(&mut p.api_key);
+        }
+        for n in &mut out.sonarr.replicas {
+            mask_str(&mut n.api_key);
+        }
+        mask_opt(&mut out.radarr.webhook_secret);
+        if let Some(ref mut p) = out.radarr.primary {
+            mask_str(&mut p.api_key);
+        }
+        for n in &mut out.radarr.replicas {
+            mask_str(&mut n.api_key);
+        }
+        mask_opt(&mut out.lidarr.webhook_secret);
+        if let Some(ref mut p) = out.lidarr.primary {
+            mask_str(&mut p.api_key);
+        }
+        for n in &mut out.lidarr.replicas {
+            mask_str(&mut n.api_key);
+        }
+        mask_str(&mut out.plex.token);
+        for n in &mut out.plex.nodes {
+            mask_opt(&mut n.token_override);
+        }
+        mask_opt(&mut out.ombi.webhook_secret);
+        mask_opt(&mut out.bazarr.webhook_secret);
+        mask_opt(&mut out.overseerr.webhook_secret);
+        mask_opt(&mut out.jellyfin.webhook_secret);
+        mask_str(&mut out.trakt.client_secret);
+        mask_opt(&mut out.trakt.access_token);
+        mask_opt(&mut out.trakt.refresh_token);
+        mask_str(&mut out.influx.token);
+        if let Some(ref mut m) = out.notifications.mattermost {
+            mask_opt(&mut m.bot_token);
+            mask_str(&mut m.webhook_url);
+        }
+        if let Some(ref mut d) = out.notifications.discord {
+            mask_str(&mut d.webhook_url);
+        }
+        if let Some(ref mut w) = out.notifications.generic_webhook {
+            mask_opt(&mut w.secret);
+        }
+        for t in &mut out.notifications.targets {
+            mask_notification_channel(&mut t.channel);
+        }
+        mask_str(&mut out.oidc.client_secret);
+        mask_str(&mut out.offsite_backup.passphrase);
+        mask_str(&mut out.offsite_backup.auth_secret);
+        out
+    }
+
+    /// Restore any secret fields that still carry [`SECRET_MASK`] (or empty `jwt_secret`)
+    /// from `prev` when saving settings from the UI.
+    pub fn restore_redacted_secrets(&mut self, prev: &Self) {
+        if self.system.jwt_secret.is_empty() || self.system.jwt_secret == SECRET_MASK {
+            self.system.jwt_secret = prev.system.jwt_secret.clone();
+        }
+        for (id, node) in &mut self.nodes {
+            if let Some(prev_node) = prev.nodes.get(id) {
+                restore_opt(&mut node.password, &prev_node.password);
+            }
+        }
+        for zone in &mut self.zones {
+            if let Some(prev_zone) = prev.zones.iter().find(|z| z.id == zone.id) {
+                restore_opt(&mut zone.webhook_secret, &prev_zone.webhook_secret);
+            }
+        }
+        restore_opt(&mut self.sonarr.webhook_secret, &prev.sonarr.webhook_secret);
+        if let (Some(c), Some(p)) = (&mut self.sonarr.primary, &prev.sonarr.primary) {
+            restore_str(&mut c.api_key, &p.api_key);
+        }
+        for n in &mut self.sonarr.replicas {
+            if let Some(pn) = prev.sonarr.replicas.iter().find(|p| p.name == n.name) {
+                restore_str(&mut n.api_key, &pn.api_key);
+            }
+        }
+        restore_opt(&mut self.radarr.webhook_secret, &prev.radarr.webhook_secret);
+        if let (Some(c), Some(p)) = (&mut self.radarr.primary, &prev.radarr.primary) {
+            restore_str(&mut c.api_key, &p.api_key);
+        }
+        for n in &mut self.radarr.replicas {
+            if let Some(pn) = prev.radarr.replicas.iter().find(|p| p.name == n.name) {
+                restore_str(&mut n.api_key, &pn.api_key);
+            }
+        }
+        restore_opt(&mut self.lidarr.webhook_secret, &prev.lidarr.webhook_secret);
+        if let (Some(c), Some(p)) = (&mut self.lidarr.primary, &prev.lidarr.primary) {
+            restore_str(&mut c.api_key, &p.api_key);
+        }
+        for n in &mut self.lidarr.replicas {
+            if let Some(pn) = prev.lidarr.replicas.iter().find(|p| p.name == n.name) {
+                restore_str(&mut n.api_key, &pn.api_key);
+            }
+        }
+        restore_str(&mut self.plex.token, &prev.plex.token);
+        for n in &mut self.plex.nodes {
+            if let Some(pn) = prev.plex.nodes.iter().find(|p| p.name == n.name) {
+                restore_opt(&mut n.token_override, &pn.token_override);
+            }
+        }
+        restore_opt(&mut self.ombi.webhook_secret, &prev.ombi.webhook_secret);
+        restore_opt(&mut self.bazarr.webhook_secret, &prev.bazarr.webhook_secret);
+        restore_opt(&mut self.overseerr.webhook_secret, &prev.overseerr.webhook_secret);
+        restore_opt(&mut self.jellyfin.webhook_secret, &prev.jellyfin.webhook_secret);
+        restore_str(&mut self.trakt.client_secret, &prev.trakt.client_secret);
+        restore_opt(&mut self.trakt.access_token, &prev.trakt.access_token);
+        restore_opt(&mut self.trakt.refresh_token, &prev.trakt.refresh_token);
+        restore_str(&mut self.influx.token, &prev.influx.token);
+        if let (Some(c), Some(p)) = (&mut self.notifications.mattermost, &prev.notifications.mattermost) {
+            restore_opt(&mut c.bot_token, &p.bot_token);
+            restore_str(&mut c.webhook_url, &p.webhook_url);
+        }
+        if let (Some(c), Some(p)) = (&mut self.notifications.discord, &prev.notifications.discord) {
+            restore_str(&mut c.webhook_url, &p.webhook_url);
+        }
+        if let (Some(c), Some(p)) = (&mut self.notifications.generic_webhook, &prev.notifications.generic_webhook) {
+            restore_opt(&mut c.secret, &p.secret);
+        }
+        for t in &mut self.notifications.targets {
+            if let Some(pt) = prev.notifications.targets.iter().find(|p| p.id == t.id) {
+                restore_notification_channel(&mut t.channel, &pt.channel);
+            }
+        }
+        restore_str(&mut self.oidc.client_secret, &prev.oidc.client_secret);
+        restore_str(&mut self.offsite_backup.passphrase, &prev.offsite_backup.passphrase);
+        restore_str(&mut self.offsite_backup.auth_secret, &prev.offsite_backup.auth_secret);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct HardlinkPairConfig {
+    pub name: String,
+    pub source_dir: String,
+    pub dest_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct HardlinkCheckerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_hardlink_interval")]
+    pub check_interval_secs: u64,
+    #[serde(default = "default_hardlink_alert_mb")]
+    pub alert_wasted_mb_threshold: u64,
+    #[serde(default)]
+    pub extra_pairs: Vec<HardlinkPairConfig>,
+}
+
+fn default_hardlink_interval() -> u64 { 3600 }
+fn default_hardlink_alert_mb() -> u64 { 1024 }
+
+impl Default for HardlinkCheckerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_interval_secs: default_hardlink_interval(),
+            alert_wasted_mb_threshold: default_hardlink_alert_mb(),
+            extra_pairs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OidcConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_oidc_provider_name")]
+    pub provider_name: String,
+    #[serde(default)]
+    pub issuer_url: String,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+    #[serde(default)]
+    pub redirect_url: String,
+    #[serde(default = "default_oidc_scopes")]
+    pub scopes: String,
+    #[serde(default = "default_true")]
+    pub auto_provision_users: bool,
+    #[serde(default = "default_oidc_default_role")]
+    pub default_role: String,
+    #[serde(default)]
+    pub admin_groups: Vec<String>,
+}
+
+fn default_oidc_provider_name() -> String { "SSO".to_string() }
+fn default_oidc_scopes() -> String { "openid profile email".to_string() }
+fn default_oidc_default_role() -> String { "viewer".to_string() }
+
+impl Default for OidcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider_name: default_oidc_provider_name(),
+            issuer_url: String::new(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            redirect_url: String::new(),
+            scopes: default_oidc_scopes(),
+            auto_provision_users: true,
+            default_role: default_oidc_default_role(),
+            admin_groups: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OffsiteBackupConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_backup_interval_hours")]
+    pub interval_hours: u64,
+    #[serde(default = "default_backup_retain_count")]
+    pub retain_count: usize,
+    /// `"local"`, `"webdav"`, or `"s3_http"` (presigned/HTTP PUT endpoint)
+    #[serde(default = "default_backup_target_type")]
+    pub target_type: String,
+    /// Local directory path (for `"local"`) or base HTTP/WebDAV URL (for `"webdav"`/`"s3_http"`)
+    #[serde(default)]
+    pub destination: String,
+    /// Passphrase used to encrypt backups with AES-256-GCM. Required when enabled.
+    #[serde(default)]
+    pub passphrase: String,
+    #[serde(default)]
+    pub auth_username: String,
+    /// Basic password or Bearer token depending on target_type / auth_username presence
+    #[serde(default)]
+    pub auth_secret: String,
+}
+
+fn default_backup_interval_hours() -> u64 { 24 }
+fn default_backup_retain_count() -> usize { 7 }
+fn default_backup_target_type() -> String { "local".to_string() }
+
+impl Default for OffsiteBackupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_hours: default_backup_interval_hours(),
+            retain_count: default_backup_retain_count(),
+            target_type: default_backup_target_type(),
+            destination: String::new(),
+            passphrase: String::new(),
+            auth_username: String::new(),
+            auth_secret: String::new(),
         }
     }
 }

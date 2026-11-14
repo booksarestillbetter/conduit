@@ -28,8 +28,12 @@ const HEALTHY_RUN_THRESHOLD: Duration = Duration::from_secs(300);
 /// per attempt. `registry` is updated on every crash/restart so the Platform Health UI
 /// panel can see it; per-cycle heartbeats are reported separately by each engine loop
 /// via `registry::TaskHandle` (see engines/registry.rs).
-pub fn spawn_supervised<F, Fut>(name: &'static str, registry: EngineRegistry, make_future: F)
-where
+pub fn spawn_supervised<F, Fut>(
+    name: &'static str,
+    registry: EngineRegistry,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    make_future: F,
+) where
     F: Fn() -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
@@ -38,8 +42,18 @@ where
     tokio::spawn(async move {
         let mut backoff = BASE_BACKOFF;
         loop {
+            if *shutdown.borrow() {
+                break;
+            }
             let started = Instant::now();
-            let result = AssertUnwindSafe(make_future()).catch_unwind().await;
+            let result = tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|v| *v) => {
+                    tracing::info!("🛑 Background engine '{}' shutting down.", name);
+                    break;
+                }
+                res = AssertUnwindSafe(make_future()).catch_unwind() => res,
+            };
             let ran_for = started.elapsed();
 
             let reason = match result {
@@ -65,7 +79,14 @@ where
                 name, reason, ran_for, backoff
             );
 
-            tokio::time::sleep(backoff).await;
+            tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|v| *v) => {
+                    tracing::info!("🛑 Background engine '{}' shutting down during backoff.", name);
+                    break;
+                }
+                _ = tokio::time::sleep(backoff) => {}
+            }
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     });

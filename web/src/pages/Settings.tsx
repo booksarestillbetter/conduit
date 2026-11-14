@@ -36,6 +36,7 @@ import {
   Boxes,
   Globe,
   Clock,
+  Users,
 } from 'lucide-react';
 import {
   fetchSettings,
@@ -68,10 +69,15 @@ import {
   sendOmbiWebhookTest,
   purgeHistoryNow,
   RetentionPurgeSummary,
+  listUsers,
+  createUserAccount,
+  updateUserRole,
+  deleteUserAccount,
+  runOffsiteBackupNow,
 } from '../services/api';
 import { useNodeCapabilities } from '../hooks/useNodeCapabilities';
 import { useServerVersion } from '../hooks/useServerVersion';
-import { AppConfig, ApiTokenRecord, ArrNodeConfig, ZoneConfig, ClassifyFileResponse, TransmissionNodeConfig, RemoteSyncFolderMapping, PlexScrobbleRecord, OmbiRequestRecord, NotificationChannel, NotificationTarget, NOTIFICATION_CATEGORIES, TrackerCircuitBreakerConfig } from '../types';
+import { AppConfig, ApiTokenRecord, ArrNodeConfig, ZoneConfig, ClassifyFileResponse, TransmissionNodeConfig, RemoteSyncFolderMapping, PlexScrobbleRecord, OmbiRequestRecord, NotificationChannel, NotificationTarget, NOTIFICATION_CATEGORIES, TrackerCircuitBreakerConfig, UserRecord } from '../types';
 
 const DEFAULT_TRACKER_CB_CONFIG: TrackerCircuitBreakerConfig = {
   enabled: true,
@@ -88,7 +94,7 @@ const DEFAULT_TRACKER_CB_CONFIG: TrackerCircuitBreakerConfig = {
 };
 
 export const Settings: React.FC = () => {
-  const [tab, setTab] = useState<'nodes' | 'arr' | 'zones' | 'sync' | 'plex_trakt' | 'notify' | 'rules' | 'system' | 'tokens' | 'backup'>('nodes');
+  const [tab, setTab] = useState<'nodes' | 'arr' | 'zones' | 'sync' | 'plex_trakt' | 'notify' | 'rules' | 'system' | 'tokens' | 'users_sso' | 'backup'>('nodes');
   const [copiedZoneWebhook, setCopiedZoneWebhook] = useState<string | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [tokens, setTokens] = useState<ApiTokenRecord[]>([]);
@@ -195,6 +201,19 @@ export const Settings: React.FC = () => {
   const [backupPass, setBackupPass] = useState('');
   const [restoreBundle, setRestoreBundle] = useState('');
   const [restorePass, setRestorePass] = useState('');
+  const [offsiteBackupRunning, setOffsiteBackupRunning] = useState(false);
+
+  // Users & RBAC
+  const [usersList, setUsersList] = useState<UserRecord[]>([]);
+  const [newUserUsername, setNewUserUsername] = useState('');
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [newUserRole, setNewUserRole] = useState<'admin' | 'operator' | 'requester' | 'viewer'>('viewer');
+
+  useEffect(() => {
+    if (tab === 'users_sso') {
+      listUsers().then(setUsersList).catch(() => {});
+    }
+  }, [tab]);
 
   const loadHookScript = async (fmt: string) => {
     setLoadingScript(true);
@@ -787,6 +806,7 @@ export const Settings: React.FC = () => {
           { id: 'rules', label: 'Rules & Pipeline', icon: Sliders },
           { id: 'system', label: 'System & Network', icon: Cpu },
           { id: 'tokens', label: 'API Tokens', icon: Key },
+          { id: 'users_sso', label: 'Users & SSO', icon: Users },
           { id: 'backup', label: 'Vault & Backup', icon: Shield },
         ].map((t) => {
           const Icon = t.icon;
@@ -4929,9 +4949,239 @@ export const Settings: React.FC = () => {
         </div>
       )}
 
+      {/* Tab 8b: Users & OIDC/SSO */}
+      {tab === 'users_sso' && (
+        <div className="space-y-6 max-w-4xl">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 space-y-4">
+            <h2 className="text-base font-bold text-slate-200 flex items-center space-x-2">
+              <Users className="h-5 w-5 text-brand-400" />
+              <span>Multi-User RBAC</span>
+            </h2>
+            <p className="text-xs text-slate-400">
+              Roles: <strong className="text-slate-200">admin</strong> (full access),{' '}
+              <strong className="text-slate-200">operator</strong> (torrents, sync, arr),{' '}
+              <strong className="text-slate-200">requester</strong> (read + arr search/grab),{' '}
+              <strong className="text-slate-200">viewer</strong> (read-only).
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <input
+                type="text"
+                placeholder="Username"
+                value={newUserUsername}
+                onChange={(e) => setNewUserUsername(e.target.value)}
+                className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:border-brand-500 focus:outline-none"
+              />
+              <input
+                type="password"
+                placeholder="Password (8+ chars)"
+                value={newUserPassword}
+                onChange={(e) => setNewUserPassword(e.target.value)}
+                className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:border-brand-500 focus:outline-none"
+              />
+              <select
+                value={newUserRole}
+                onChange={(e) => setNewUserRole(e.target.value as any)}
+                className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:border-brand-500 focus:outline-none"
+              >
+                <option value="viewer">Viewer</option>
+                <option value="requester">Requester</option>
+                <option value="operator">Operator</option>
+                <option value="admin">Admin</option>
+              </select>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await createUserAccount({
+                      username: newUserUsername.trim(),
+                      password: newUserPassword,
+                      role: newUserRole,
+                    });
+                    setNewUserUsername('');
+                    setNewUserPassword('');
+                    const updated = await listUsers();
+                    setUsersList(updated);
+                  } catch (err: any) {
+                    alert(err.message);
+                  }
+                }}
+                className="rounded-xl bg-brand-600 hover:bg-brand-500 px-4 py-2 text-sm font-semibold text-white"
+              >
+                Add User
+              </button>
+            </div>
+
+            <div className="divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-950/50">
+              {usersList.map((u) => (
+                <div key={u.id} className="flex items-center justify-between px-4 py-3 text-sm">
+                  <div>
+                    <span className="font-semibold text-slate-100">{u.username}</span>
+                    {u.totp_enabled && (
+                      <span className="ml-2 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
+                        2FA
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <select
+                      value={u.role || (u.is_admin ? 'admin' : 'viewer')}
+                      onChange={async (e) => {
+                        try {
+                          await updateUserRole(u.id, e.target.value);
+                          const updated = await listUsers();
+                          setUsersList(updated);
+                        } catch (err: any) {
+                          alert(err.message);
+                        }
+                      }}
+                      className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-200"
+                    >
+                      <option value="viewer">viewer</option>
+                      <option value="requester">requester</option>
+                      <option value="operator">operator</option>
+                      <option value="admin">admin</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!window.confirm(`Delete user '${u.username}'?`)) return;
+                        try {
+                          await deleteUserAccount(u.id);
+                          const updated = await listUsers();
+                          setUsersList(updated);
+                        } catch (err: any) {
+                          alert(err.message);
+                        }
+                      }}
+                      className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-500/15 hover:text-rose-400"
+                      title="Delete user"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold text-slate-200">OIDC / SSO Login</h2>
+                <p className="text-xs text-slate-400">
+                  Connect Authentik, Authelia, Keycloak, or any OpenID Connect provider (Authorization Code + PKCE).
+                </p>
+              </div>
+              <label className="flex items-center space-x-2 text-xs font-semibold text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={!!config.oidc?.enabled}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      oidc: {
+                        enabled: e.target.checked,
+                        provider_name: config.oidc?.provider_name ?? 'SSO',
+                        issuer_url: config.oidc?.issuer_url ?? '',
+                        client_id: config.oidc?.client_id ?? '',
+                        client_secret: config.oidc?.client_secret ?? '',
+                        redirect_url: config.oidc?.redirect_url ?? '',
+                        scopes: config.oidc?.scopes ?? 'openid profile email',
+                        auto_provision_users: config.oidc?.auto_provision_users ?? true,
+                        default_role: config.oidc?.default_role ?? 'viewer',
+                        admin_groups: config.oidc?.admin_groups ?? [],
+                      },
+                    })
+                  }
+                  className="rounded border-slate-700 bg-slate-800 text-brand-500"
+                />
+                <span>Enable OIDC</span>
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-400 mb-1">Provider Label</label>
+                <input
+                  type="text"
+                  value={config.oidc?.provider_name ?? 'SSO'}
+                  onChange={(e) =>
+                    setConfig({ ...config, oidc: { ...(config.oidc as any), provider_name: e.target.value } })
+                  }
+                  className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-400 mb-1">Issuer URL</label>
+                <input
+                  type="url"
+                  placeholder="https://auth.example.com/application/o/conduit/"
+                  value={config.oidc?.issuer_url ?? ''}
+                  onChange={(e) =>
+                    setConfig({ ...config, oidc: { ...(config.oidc as any), issuer_url: e.target.value } })
+                  }
+                  className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-400 mb-1">Client ID</label>
+                <input
+                  type="text"
+                  value={config.oidc?.client_id ?? ''}
+                  onChange={(e) =>
+                    setConfig({ ...config, oidc: { ...(config.oidc as any), client_id: e.target.value } })
+                  }
+                  className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-400 mb-1">Client Secret</label>
+                <input
+                  type="password"
+                  value={config.oidc?.client_secret ?? ''}
+                  onChange={(e) =>
+                    setConfig({ ...config, oidc: { ...(config.oidc as any), client_secret: e.target.value } })
+                  }
+                  className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-400 mb-1">Default Role for New OIDC Users</label>
+                <select
+                  value={config.oidc?.default_role ?? 'viewer'}
+                  onChange={(e) =>
+                    setConfig({ ...config, oidc: { ...(config.oidc as any), default_role: e.target.value } })
+                  }
+                  className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+                >
+                  <option value="viewer">viewer</option>
+                  <option value="requester">requester</option>
+                  <option value="operator">operator</option>
+                  <option value="admin">admin</option>
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-400 mb-1">Redirect URI (optional override)</label>
+                <input
+                  type="url"
+                  placeholder={`${window.location.origin}/api/auth/oidc/callback`}
+                  value={config.oidc?.redirect_url ?? ''}
+                  onChange={(e) =>
+                    setConfig({ ...config, oidc: { ...(config.oidc as any), redirect_url: e.target.value } })
+                  }
+                  className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Tab 9: Backup & Vault */}
       {tab === 'backup' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-4xl">
+        <div className="space-y-6 max-w-4xl">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 space-y-4">
             <h2 className="text-base font-bold text-slate-200 flex items-center space-x-2">
               <Download className="h-5 w-5 text-brand-400" />
@@ -4997,6 +5247,144 @@ export const Settings: React.FC = () => {
               <span>Restore Configuration</span>
             </button>
           </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-base font-bold text-slate-200 flex items-center space-x-2">
+                <Shield className="h-5 w-5 text-brand-400" />
+                <span>Automated Encrypted Off-Site Backups</span>
+              </h2>
+              <p className="text-xs text-slate-400">
+                Periodically encrypts your config (AES-256-GCM) and writes to a local directory or WebDAV/HTTP PUT target.
+              </p>
+            </div>
+            <label className="flex items-center space-x-2 text-xs font-semibold text-slate-300">
+              <input
+                type="checkbox"
+                checked={!!config.offsite_backup?.enabled}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    offsite_backup: {
+                      enabled: e.target.checked,
+                      interval_hours: config.offsite_backup?.interval_hours ?? 24,
+                      retain_count: config.offsite_backup?.retain_count ?? 7,
+                      target_type: config.offsite_backup?.target_type ?? 'local',
+                      destination: config.offsite_backup?.destination ?? '',
+                      passphrase: config.offsite_backup?.passphrase ?? '',
+                      auth_username: config.offsite_backup?.auth_username ?? '',
+                      auth_secret: config.offsite_backup?.auth_secret ?? '',
+                    },
+                  })
+                }
+                className="rounded border-slate-700 bg-slate-800 text-brand-500"
+              />
+              <span>Enable Schedule</span>
+            </label>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+            <div>
+              <label className="block font-semibold text-slate-400 mb-1">Target Type</label>
+              <select
+                value={config.offsite_backup?.target_type ?? 'local'}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    offsite_backup: { ...(config.offsite_backup as any), target_type: e.target.value },
+                  })
+                }
+                className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+              >
+                <option value="local">Local / Mounted Directory</option>
+                <option value="webdav">WebDAV (HTTP PUT)</option>
+                <option value="s3_http">S3 / HTTP PUT URL</option>
+              </select>
+            </div>
+            <div className="md:col-span-2">
+              <label className="block font-semibold text-slate-400 mb-1">Destination Path or URL</label>
+              <input
+                type="text"
+                placeholder="/backups/conduit or https://dav.example.com/conduit"
+                value={config.offsite_backup?.destination ?? ''}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    offsite_backup: { ...(config.offsite_backup as any), destination: e.target.value },
+                  })
+                }
+                className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-400 mb-1">Encryption Passphrase</label>
+              <input
+                type="password"
+                value={config.offsite_backup?.passphrase ?? ''}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    offsite_backup: { ...(config.offsite_backup as any), passphrase: e.target.value },
+                  })
+                }
+                className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-400 mb-1">Interval (hours)</label>
+              <input
+                type="number"
+                min={1}
+                value={config.offsite_backup?.interval_hours ?? 24}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    offsite_backup: { ...(config.offsite_backup as any), interval_hours: Number(e.target.value) || 24 },
+                  })
+                }
+                className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-400 mb-1">Retain Count (local)</label>
+              <input
+                type="number"
+                min={1}
+                value={config.offsite_backup?.retain_count ?? 7}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    offsite_backup: { ...(config.offsite_backup as any), retain_count: Number(e.target.value) || 7 },
+                  })
+                }
+                className="w-full rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="button"
+              disabled={offsiteBackupRunning}
+              onClick={async () => {
+                setOffsiteBackupRunning(true);
+                try {
+                  const res = await runOffsiteBackupNow();
+                  alert(`Off-site backup saved to ${res.location} (${res.bytes} bytes)`);
+                } catch (err: any) {
+                  alert(`Off-site backup failed: ${err.message}`);
+                } finally {
+                  setOffsiteBackupRunning(false);
+                }
+              }}
+              className="rounded-xl bg-brand-600 hover:bg-brand-500 px-4 py-2 text-xs font-semibold text-white disabled:opacity-50"
+            >
+              {offsiteBackupRunning ? 'Running Backup...' : 'Run Off-Site Backup Now'}
+            </button>
+          </div>
+        </div>
         </div>
       )}
 
